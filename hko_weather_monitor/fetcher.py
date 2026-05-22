@@ -157,11 +157,6 @@ def fetch_all_forecasts() -> tuple:
     return hourly_records, daily_records
 
 
-def weather_code_description(code: int) -> str:
-    """Convert HKO weather code to description."""
-    return WEATHER_CODES.get(code, f"Unknown ({code})")
-
-
 # ─── Adaptive sentinel polling (Last-Modified based) ─────────────
 
 def check_last_modified(url: str) -> str | None:

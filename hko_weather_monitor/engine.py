@@ -55,11 +55,6 @@ def log_trigger(trigger_type: str, message: str):
         pass
 
 
-def _parse_hko_datetime(dt_str: str) -> datetime:
-    """Parse HKO datetime strings: YYYYMMDDHHmm (14 chars)."""
-    return datetime.strptime(dt_str, "%Y%m%d%H%M")
-
-
 def _weather_code_to_cloud_coverage(code: int) -> float:
     """Map HKO weather code to approximate cloud coverage percentage."""
     mapping = {
@@ -272,35 +267,6 @@ class WeatherTradingEngine:
                 log_trigger('momentum', f"Token {token_id[:20]}... delta={momentum:.4f}")
                 asyncio.ensure_future(self._trigger_rescore(f"momentum:{token_id[:20]}"))
 
-    # async def _listen_and_track removed — real-time tracking handled via book.on_price_update callback
-
-    def _record_all_orderbook_prices(self):
-        """Record current orderbook mid-prices for all tracked tokens."""
-        if not self.book_manager:
-            return
-        # Get all token IDs from orderbook state
-        conn = get_connection()
-        tokens = conn.execute(
-            "SELECT DISTINCT yes_token_id FROM market_outcomes"
-        ).fetchall()
-        conn.close()
-
-        for (token_id,) in tokens:
-            self._track_token_orderbook(str(token_id))
-
-    def _track_token_orderbook(self, token_id: str):
-        """Get current best bid/ask and record in temporal tracker."""
-        if not self.book_manager:
-            return
-        try:
-            bids, asks = self.book_manager.get_snapshot(token_id)
-            if bids and asks:
-                best_bid = bids[0][0]
-                best_ask = asks[0][0]
-                self.tracker.record_orderbook(token_id, best_bid, best_ask)
-        except Exception:
-            pass
-
     # ─── HKO Forecast Sync ──────────────────────────────────────
 
     async def sync_hko_forecasts(self):
@@ -503,13 +469,12 @@ class WeatherTradingEngine:
 
     async def _check_risk_management(self):
         """Check portfolio risk: unrealized losses, total exposure."""
+        conn = get_connection()
         try:
-            conn = get_connection()
             balance = conn.execute(
                 "SELECT cash_balance FROM accounts WHERE account_id = 'paper_user'"
             ).fetchone()
             if not balance:
-                conn.close()
                 return
             balance = balance[0]
 
@@ -517,7 +482,6 @@ class WeatherTradingEngine:
             positions = conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(CASE WHEN qty > 0 THEN qty ELSE -qty END), 0) FROM paper_positions WHERE qty != 0"
             ).fetchone()
-            conn.close()
 
             num_positions, total_shares = positions
             if num_positions > 0:
@@ -528,6 +492,8 @@ class WeatherTradingEngine:
                 )
         except Exception as e:
             logger.debug(f"Risk check failed: {e}")
+        finally:
+            conn.close()
 
     async def _trigger_rescore(self, reason: str):
         """Debounce-protected re-score trigger."""
@@ -617,12 +583,14 @@ class WeatherTradingEngine:
 
                 # Get all outcomes
                 conn = get_connection()
-                outcomes = conn.execute(
-                    "SELECT yes_token_id, outcome_name, temp_min, temp_max "
-                    "FROM market_outcomes WHERE condition_id = ?",
-                    (condition_id,)
-                ).fetchall()
-                conn.close()
+                try:
+                    outcomes = conn.execute(
+                        "SELECT yes_token_id, outcome_name, temp_min, temp_max "
+                        "FROM market_outcomes WHERE condition_id = ?",
+                        (condition_id,)
+                    ).fetchall()
+                finally:
+                    conn.close()
 
                 # Score all buckets
                 scored_buckets = []
@@ -708,12 +676,14 @@ class WeatherTradingEngine:
 
                 # Check if we already have a NO position on this condition
                 conn = get_connection()
-                existing = conn.execute(
-                    "SELECT COUNT(*) FROM paper_positions "
-                    "WHERE condition_id = ? AND side = 'NO' AND status = 'OPEN'",
-                    (condition_id,)
-                ).fetchone()[0]
-                conn.close()
+                try:
+                    existing = conn.execute(
+                        "SELECT COUNT(*) FROM paper_positions "
+                        "WHERE condition_id = ? AND side = 'NO' AND status = 'OPEN'",
+                        (condition_id,)
+                    ).fetchone()[0]
+                finally:
+                    conn.close()
 
                 if existing > 0:
                     logger.info(
@@ -733,11 +703,13 @@ class WeatherTradingEngine:
                 # Kelly sizing
                 kelly_frac = max(0, 0.25 * edge / (1.0 - best['market_yes']))
                 conn = get_connection()
-                balance = conn.execute(
-                    "SELECT cash_balance FROM accounts "
-                    "WHERE account_id = 'paper_user'"
-                ).fetchone()[0]
-                conn.close()
+                try:
+                    balance = conn.execute(
+                        "SELECT cash_balance FROM accounts "
+                        "WHERE account_id = 'paper_user'"
+                    ).fetchone()[0]
+                finally:
+                    conn.close()
 
                 position_size = min(
                     balance * kelly_frac,
@@ -750,16 +722,18 @@ class WeatherTradingEngine:
 
                 # Record tick
                 tick_conn = get_connection()
-                tick_conn.execute(
-                    "INSERT INTO market_ticks "
-                    "(condition_id, polymarket_yes_price, hko_predicted_value, "
-                    "hko_forecast_horizon_days, model_calculated_prob, generated_signal) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (condition_id, best['market_yes'], adjusted_temp,
-                     horizon, best['model_prob'], "SELL")
-                )
-                tick_conn.commit()
-                tick_conn.close()
+                try:
+                    tick_conn.execute(
+                        "INSERT INTO market_ticks "
+                        "(condition_id, polymarket_yes_price, hko_predicted_value, "
+                        "hko_forecast_horizon_days, model_calculated_prob, generated_signal) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (condition_id, best['market_yes'], adjusted_temp,
+                         horizon, best['model_prob'], "SELL")
+                    )
+                    tick_conn.commit()
+                finally:
+                    tick_conn.close()
 
                 # Execute
                 fill = self.execution_engine.execute_paper_sell(
@@ -786,16 +760,17 @@ class WeatherTradingEngine:
 
     def _update_engine_timestamp(self):
         """Update engine timestamp in DB for dashboard."""
+        conn = get_connection()
         try:
-            conn = get_connection()
             conn.execute(
                 "INSERT OR REPLACE INTO engine_status (key, value) VALUES ('last_heartbeat', ?)",
                 (str(time.time()),)
             )
             conn.commit()
-            conn.close()
         except Exception:
             pass
+        finally:
+            conn.close()
 
     def get_status(self) -> Dict:
         """Get engine status for dashboard/API."""

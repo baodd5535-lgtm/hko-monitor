@@ -201,26 +201,27 @@ def get_hko_forecast_for_date(date_str_yyyymmdd):
 
     # Fallback: single station daily forecast
     conn = get_connection()
-    row = conn.execute("""
-        SELECT max_temperature, min_temperature
-        FROM forecast_daily
-        WHERE station_code = 'HKO' AND forecast_date = ?
-        ORDER BY fetched_at DESC LIMIT 1
-    """, (date_str_yyyymmdd,)).fetchone()
+    try:
+        row = conn.execute("""
+            SELECT max_temperature, min_temperature
+            FROM forecast_daily
+            WHERE station_code = 'HKO' AND forecast_date = ?
+            ORDER BY fetched_at DESC LIMIT 1
+        """, (date_str_yyyymmdd,)).fetchone()
 
-    if row:
+        if row:
+            return row[0]
+
+        # Fallback to 9-day forecast
+        row = conn.execute("""
+            SELECT max_temp FROM forecast_nine_day
+            WHERE forecast_date = ?
+            LIMIT 1
+        """, (date_str_yyyymmdd,)).fetchone()
+
+        return row[0] if row else None
+    finally:
         conn.close()
-        return row[0]
-
-    # Fallback to 9-day forecast
-    row = conn.execute("""
-        SELECT max_temp FROM forecast_nine_day
-        WHERE forecast_date = ?
-        LIMIT 1
-    """, (date_str_yyyymmdd,)).fetchone()
-
-    conn.close()
-    return row[0] if row else None
 
 
 async def run_signal_engine():
@@ -278,6 +279,15 @@ async def run_signal_engine():
             target_date = date.fromisoformat(date_str)
             today = date.today()
             horizon = (target_date - today).days
+
+            # Intraday trading cutoff: 18:00 HKT for same-day markets
+            from datetime import datetime as dt_now, timedelta, timezone
+            HKT = timezone(timedelta(hours=8))
+            now_hkt = dt_now.now(HKT)
+            if target_date == now_hkt.date() and now_hkt.hour >= 18:
+                logger.info(f"[{condition_id}] Same-day market past 18:00 HKT cutoff ({now_hkt.strftime('%H:%M')}), skipping")
+                continue
+
             threshold = get_edge_threshold(horizon)
 
             # Get all outcomes for this condition
@@ -320,6 +330,15 @@ async def run_signal_engine():
                     'token_id': token_id, 'outcome_name': outcome_name,
                     'model_prob': model_prob, 'market_yes': market_yes,
                 })
+
+            # Phase 1.5: Bayesian blend with market prices
+            all_market_prices = [b.get('market_yes', 0.0) if b.get('market_yes') is not None else 0.0 for b in scored_buckets]
+            blended_probs = bayesian_blend_probs(all_probs, all_market_prices, horizon)
+
+            # Map blended probabilities back to buckets
+            for idx, bucket in enumerate(scored_buckets):
+                if idx < len(blended_probs):
+                    bucket['model_prob'] = blended_probs[idx]
 
             # Phase 2: Score each bucket for NO trades
             for bucket in scored_buckets:

@@ -40,19 +40,22 @@ def backtest_market(condition_id, target_date, hko_max_temp, outcomes, horizon_d
         temp_bucket = outcome.get('temp', outcome.get('label', ''))
         market_price = outcome.get('yes_price', 0) / 100  # Convert cents to probability
         
-        # Calculate model probability
-        if temp_bucket.endswith('-'):
-            # "22°C or below" bucket
+        # Calculate model probability using regex extraction
+        import re
+        match = re.search(r'(\d+)', temp_bucket)
+        if not match:
+            continue
+        extracted_temp = float(match.group(1))
+
+        if temp_bucket.endswith('-') or 'below' in temp_bucket.lower():
             bucket_low = -100.0
-            bucket_high = float(temp_bucket[:-1]) + 0.5
-        elif temp_bucket.endswith('+'):
-            # "32°C or higher" bucket
-            bucket_low = float(temp_bucket[:-1]) - 0.5
+            bucket_high = extracted_temp + 0.5
+        elif temp_bucket.endswith('+') or 'higher' in temp_bucket.lower():
+            bucket_low = extracted_temp - 0.5
             bucket_high = 100.0
         else:
-            temp_val = float(temp_bucket)
-            bucket_low = temp_val - 0.5
-            bucket_high = temp_val + 0.5
+            bucket_low = extracted_temp - 0.5
+            bucket_high = extracted_temp + 0.5
         
         # Calculate P(bucket_low <= temp <= bucket_high)
         z_low = (bucket_low - hko_max_temp) / sigma
