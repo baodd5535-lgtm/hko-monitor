@@ -5,7 +5,7 @@ import threading
 from datetime import datetime
 from typing import Optional
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "hko_weather.db")
+DB_PATH = os.getenv("DATABASE_PATH", os.path.join(os.path.dirname(__file__), "data", "hko_weather.db"))
 
 # Thread lock for write operations (adaptive poller vs HTTP handler)
 _db_lock = threading.Lock()
@@ -106,7 +106,112 @@ def init_db():
             );
 
             CREATE INDEX IF NOT EXISTS idx_fnd_date ON forecast_nine_day(forecast_date);
+
+            -- Trigger log (engine heartbeats + trade signals)
+            CREATE TABLE IF NOT EXISTS trigger_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                type TEXT NOT NULL,
+                message TEXT
+            );
+
+            -- Polymarket markets registry (categorical outcomes)
+            CREATE TABLE IF NOT EXISTS markets (
+                condition_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                slug TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                resolution_source TEXT NOT NULL,
+                status TEXT DEFAULT 'ACTIVE',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            -- Market outcomes (one row per categorical bucket)
+            CREATE TABLE IF NOT EXISTS market_outcomes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                condition_id TEXT NOT NULL REFERENCES markets(condition_id),
+                outcome_name TEXT NOT NULL,
+                temp_min REAL,
+                temp_max REAL,
+                yes_token_id TEXT NOT NULL,
+                UNIQUE(condition_id, outcome_name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_mo_condition ON market_outcomes(condition_id);
+            CREATE INDEX IF NOT EXISTS idx_mo_token ON market_outcomes(yes_token_id);
+
+            -- Market ticks (5-15 min snapshots)
+            CREATE TABLE IF NOT EXISTS market_ticks (
+                tick_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                condition_id TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                polymarket_yes_price REAL,
+                polymarket_no_price REAL,
+                hko_predicted_value REAL,
+                hko_forecast_horizon_days INTEGER,
+                model_calculated_prob REAL,
+                generated_signal TEXT,
+                FOREIGN KEY(condition_id) REFERENCES markets(condition_id)
+            );
+
+            -- Accounts
+            CREATE TABLE IF NOT EXISTS accounts (
+                account_id TEXT PRIMARY KEY,
+                cash_balance REAL DEFAULT 10000.00,
+                allocated_margin REAL DEFAULT 0.00
+            );
+
+            -- Orderbook state snapshots (token_id is TEXT — 76-digit numbers exceed SQLite INTEGER)
+            CREATE TABLE IF NOT EXISTS orderbook_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                condition_id TEXT,
+                token_id TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                side TEXT,
+                price REAL,
+                size REAL,
+                best_bid REAL,
+                best_ask REAL,
+                updated_at TEXT
+            );
+
+            -- Paper positions (token_id is TEXT)
+            CREATE TABLE IF NOT EXISTS paper_positions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id TEXT,
+                condition_id TEXT,
+                token_id TEXT,
+                side TEXT,
+                qty REAL,
+                avg_entry_price REAL,
+                status TEXT DEFAULT 'OPEN',
+                pnl REAL DEFAULT 0.00,
+                opened_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                closed_at DATETIME,
+                FOREIGN KEY(account_id) REFERENCES accounts(account_id),
+                FOREIGN KEY(condition_id) REFERENCES markets(condition_id)
+            );
+
+            -- Paper fills (execution ledger, token_id is TEXT)
+            CREATE TABLE IF NOT EXISTS paper_fills (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id TEXT,
+                condition_id TEXT,
+                token_id TEXT,
+                order_side TEXT,
+                requested_value REAL,
+                filled_qty REAL,
+                avg_fill_price REAL,
+                slippage_paid REAL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            -- Engine status (heartbeats)
+            CREATE TABLE IF NOT EXISTS engine_status (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
         """)
+        conn.execute("INSERT OR IGNORE INTO accounts (account_id, cash_balance) VALUES ('paper_user', 10000.0)")
         conn.commit()
         conn.close()
 
