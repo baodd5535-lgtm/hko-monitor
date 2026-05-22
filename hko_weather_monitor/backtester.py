@@ -90,63 +90,65 @@ def run_full_backtest():
     Run comprehensive backtest using historical market_ticks data.
     """
     conn = get_connection()
-    cursor = conn.cursor()
-    
-    # Get all market ticks
-    ticks = cursor.execute("""
-        SELECT DISTINCT condition_id, timestamp, polymarket_yes_price, 
-                       hko_predicted_value, model_calculated_prob, generated_signal
-        FROM market_ticks
-        ORDER BY timestamp DESC
-        LIMIT 1000
-    """).fetchall()
-    
-    if not ticks:
-        return {"error": "No market ticks found in database"}
-    
-    # Calculate metrics
-    total_signals = len(ticks)
-    buy_signals = sum(1 for t in ticks if t[5] == 'BUY')
-    hold_signals = sum(1 for t in ticks if t[5] == 'HOLD')
-    
-    # Edge distribution
-    edges = []
-    for tick in ticks:
-        market_price = tick[2]
-        model_prob = tick[4]
-        edge = model_prob - market_price
-        edges.append(edge)
-    
-    avg_edge = sum(edges) / len(edges) if edges else 0
-    positive_edges = sum(1 for e in edges if e > 0)
-    negative_edges = sum(1 for e in edges if e < 0)
-    
-    # Brier scores
-    brier_scores = []
-    for tick in ticks:
-        model_prob = tick[4]
-        # For backtesting, assume actual outcome was YES/NO based on historical data
-        # This would need to be filled with actual resolution data
-        brier_scores.append(model_prob ** 2)  # Simplified
-    
-    avg_brier = sum(brier_scores) / len(brier_scores) if brier_scores else 0
-    
-    return {
-        'total_signals': total_signals,
-        'buy_signals': buy_signals,
-        'hold_signals': hold_signals,
-        'average_edge': avg_edge,
-        'positive_edges': positive_edges,
-        'negative_edges': negative_edges,
-        'brier_score': avg_brier,
-        'signal_rate': buy_signals / total_signals if total_signals > 0 else 0,
-        'edge_distribution': {
-            'large_positive': sum(1 for e in edges if e > 0.1),
-            'small_positive': sum(1 for e in edges if 0 < e <= 0.1),
-            'small_negative': sum(1 for e in edges if -0.1 <= e < 0),
-            'large_negative': sum(1 for e in edges if e < -0.1)
+    try:
+        cursor = conn.cursor()
+
+        # Get all market ticks
+        ticks = cursor.execute("""
+            SELECT DISTINCT condition_id, timestamp, polymarket_yes_price,
+                           hko_predicted_value, model_calculated_prob, generated_signal
+            FROM market_ticks
+            ORDER BY timestamp DESC
+            LIMIT 1000
+        """).fetchall()
+
+        if not ticks:
+            return {"error": "No market ticks found in database"}
+
+        # Calculate metrics
+        total_signals = len(ticks)
+        # Live execution logs "SELL" for NO trades; backtest may log "BUY"
+        buy_signals = sum(1 for t in ticks if t[5] in ('BUY', 'SELL'))
+        hold_signals = sum(1 for t in ticks if t[5] == 'HOLD')
+
+        # Edge distribution
+        edges = []
+        for tick in ticks:
+            market_price = tick[2]
+            model_prob = tick[4]
+            edge = model_prob - market_price
+            edges.append(edge)
+
+        avg_edge = sum(edges) / len(edges) if edges else 0
+        positive_edges = sum(1 for e in edges if e > 0)
+        negative_edges = sum(1 for e in edges if e < 0)
+
+        # Brier scores
+        brier_scores = []
+        for tick in ticks:
+            model_prob = tick[4]
+            brier_scores.append(model_prob ** 2)  # Simplified
+
+        avg_brier = sum(brier_scores) / len(brier_scores) if brier_scores else 0
+
+        return {
+            'total_signals': total_signals,
+            'buy_signals': buy_signals,
+            'hold_signals': hold_signals,
+            'average_edge': avg_edge,
+            'positive_edges': positive_edges,
+            'negative_edges': negative_edges,
+            'brier_score': avg_brier,
+            'signal_rate': buy_signals / total_signals if total_signals > 0 else 0,
+            'edge_distribution': {
+                'large_positive': sum(1 for e in edges if e > 0.1),
+                'small_positive': sum(1 for e in edges if 0 < e <= 0.1),
+                'small_negative': sum(1 for e in edges if -0.1 <= e < 0),
+                'large_negative': sum(1 for e in edges if e < -0.1)
+            }
         }
-    }
+    finally:
+        conn.close()
 
 
 def get_performance_report():

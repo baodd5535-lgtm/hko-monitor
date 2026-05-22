@@ -272,42 +272,7 @@ class WeatherTradingEngine:
                 log_trigger('momentum', f"Token {token_id[:20]}... delta={momentum:.4f}")
                 asyncio.ensure_future(self._trigger_rescore(f"momentum:{token_id[:20]}"))
 
-    async def _listen_and_track(self, book: PolymarketOrderbookManager):
-        """Listen to WebSocket messages and track temporal changes."""
-        try:
-            async for message in book.ws:
-                if not self.running:
-                    break
-
-                # Process the message normally
-                await book.handle_websocket_message(message)
-                data = json.loads(message)
-
-                # Extract token prices for tracking
-                if isinstance(data, list):
-                    # Initial snapshot already processed
-                    self._record_all_orderbook_prices()
-                elif isinstance(data, dict):
-                    # Orderbook update — track affected tokens
-                    asset_id = data.get('asset_id', '')
-                    for side in ['bids', 'asks']:
-                        if side in data:
-                            for level in data[side]:
-                                token_id = str(level.get('asset_id', asset_id))
-                                if token_id:
-                                    self._track_token_orderbook(token_id)
-
-                                    # Check momentum
-                                    momentum = self.tracker.get_orderbook_momentum(token_id)
-                                    if abs(momentum) >= self.price_momentum_threshold:
-                                        logger.info(
-                                            f"[MOMENTUM] {token_id}: "
-                                            f"price delta = {momentum:.4f} over 10min"
-                                        )
-                                        await self._trigger_rescore(f"momentum:{token_id}")
-        except Exception as e:
-            logger.error(f"WebSocket listener error: {e}")
-            raise
+    # async def _listen_and_track removed — real-time tracking handled via book.on_price_update callback
 
     def _record_all_orderbook_prices(self):
         """Record current orderbook mid-prices for all tracked tokens."""
@@ -419,7 +384,10 @@ class WeatherTradingEngine:
         # 5. Also fetch 9-day forecast for extended horizon
         try:
             from hko_weather_monitor.fetcher import fetch_nine_day_forecast
+            from hko_weather_monitor.db import bulk_insert_nine_day_forecast
             nine_day = fetch_nine_day_forecast()
+            if nine_day:
+                bulk_insert_nine_day_forecast(nine_day)
             for entry in nine_day:
                 # Parse date from entry
                 date_iso = entry.get('forecast_date', '')[:10]  # First 10 chars

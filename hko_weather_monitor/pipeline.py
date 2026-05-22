@@ -175,34 +175,6 @@ def bayesian_blend_probs(
     return blended
 
 
-def _gaussian_fallback(hko_max_temp, bucket_temp, horizon_days):
-    """Original Gaussian model — fallback when empirical data is insufficient."""
-    horizon_std = {
-        0: 0.5, 1: 1.0, 2: 1.5, 3: 2.0,
-        4: 2.5, 5: 3.0, 6: 3.5, 7: 4.0, 8: 4.5, 9: 5.0,
-    }
-    sigma = horizon_std.get(max(0, min(horizon_days, 9)), 5.0)
-    bucket_low = bucket_temp - 0.5
-    bucket_high = bucket_temp + 0.5
-    if bucket_temp <= 22:
-        bucket_low = -100.0
-    elif bucket_temp >= 31:
-        bucket_high = 100.0
-    z_low = (bucket_low - hko_max_temp) / sigma
-    z_high = (bucket_high - hko_max_temp) / sigma
-    return max(0.001, min(0.999, 0.5 * (1 + math.erf(z_high / math.sqrt(2))) - 0.5 * (1 + math.erf(z_low / math.sqrt(2)))))
-
-
-def get_edge_threshold(horizon_days):
-    """Minimum edge threshold for NO trades. Higher for farther horizons."""
-    thresholds = {
-        0: 0.02, 1: 0.025, 2: 0.03, 3: 0.04,
-        4: 0.05, 5: 0.06, 6: 0.08, 7: 0.10,
-        8: 0.15, 9: 0.20,
-    }
-    return thresholds.get(max(0, min(horizon_days, 9)), 0.05)
-
-
 # Constants
 MAX_PORTFOLIO_EXPOSURE_PCT = 0.20  # Max 20% of balance per market
 CONVICTION_MIN = 0.3               # Minimum conviction score to trade
@@ -232,7 +204,7 @@ def get_hko_forecast_for_date(date_str_yyyymmdd):
     row = conn.execute("""
         SELECT max_temperature, min_temperature
         FROM forecast_daily
-        WHERE station_code = 'CCH' AND forecast_date = ?
+        WHERE station_code = 'HKO' AND forecast_date = ?
         ORDER BY fetched_at DESC LIMIT 1
     """, (date_str_yyyymmdd,)).fetchone()
 
