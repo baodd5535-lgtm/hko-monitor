@@ -261,7 +261,7 @@ async def run_signal_engine():
     - Executes if edge > threshold
     """
     # Get all active condition_ids from market_outcomes
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT DISTINCT condition_id FROM market_outcomes")
     active_conditions = [row[0] for row in cursor.fetchall()]
@@ -309,7 +309,7 @@ async def run_signal_engine():
             threshold = get_edge_threshold(horizon)
 
             # Get all outcomes for this condition
-            conn = sqlite3.connect(DB_PATH)
+            conn = get_connection()
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT yes_token_id, outcome_name, temp_min, temp_max
@@ -390,7 +390,7 @@ async def run_signal_engine():
             )
 
             # Portfolio exposure check
-            conn = sqlite3.connect(DB_PATH)
+            conn = get_connection()
             balance = conn.execute(
                 "SELECT cash_balance FROM accounts WHERE account_id = 'paper_user'"
             ).fetchone()[0]

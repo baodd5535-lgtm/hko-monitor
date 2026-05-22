@@ -18,7 +18,7 @@ class Config:
     POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "300"))  # 5 minutes
 
     # Database path (absolute or relative)
-    DATABASE_PATH = os.getenv("DATABASE_PATH", "weather_data.db")
+    DATABASE_PATH = os.getenv("DATABASE_PATH", os.path.join(os.path.dirname(__file__), "data", "hko_weather.db"))
 
     # Logging
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

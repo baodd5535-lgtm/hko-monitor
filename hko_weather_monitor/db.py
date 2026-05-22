@@ -5,7 +5,29 @@ import threading
 from datetime import datetime
 from typing import Optional
 
-DB_PATH = os.getenv("DATABASE_PATH", os.path.join(os.path.dirname(__file__), "data", "hko_weather.db"))
+def _get_db_path() -> str:
+    """Resolve DB path: env var > Config.DATABASE_PATH > default.
+    Lazy evaluation allows tests to override Config.DATABASE_PATH before first use."""
+    env = os.getenv("DATABASE_PATH")
+    if env:
+        return env
+    try:
+        from hko_weather_monitor.config import Config
+        return Config.DATABASE_PATH
+    except Exception:
+        pass
+    return os.path.join(os.path.dirname(__file__), "data", "hko_weather.db")
+
+
+# Backward-compatible alias (used by engine.py, pipeline.py, backtester.py).
+# Evaluated lazily so tests can override Config.DATABASE_PATH.
+class _DBPath:
+    def __str__(self):
+        return _get_db_path()
+    def __fspath__(self):
+        return _get_db_path()
+DB_PATH = _DBPath()
+
 
 # Thread lock for write operations (adaptive poller vs HTTP handler)
 _db_lock = threading.Lock()
@@ -13,8 +35,11 @@ _db_lock = threading.Lock()
 
 def get_connection() -> sqlite3.Connection:
     """Get database connection, creating if needed."""
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    db_path = _get_db_path()
+    parent = os.path.dirname(db_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")

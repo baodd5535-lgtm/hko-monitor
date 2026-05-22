@@ -6,7 +6,11 @@ from datetime import datetime
 from typing import Optional
 
 from .config import Config
-from .database import WeatherDatabase
+from .db import (
+    bulk_insert_readings,
+    bulk_insert_forecasts_daily,
+    bulk_insert_forecasts_hourly,
+)
 from .api_client import HKOApiClient
 
 logger = logging.getLogger(__name__)
@@ -15,7 +19,6 @@ logger = logging.getLogger(__name__)
 class WeatherPoller:
     def __init__(self, config: Config):
         self.config = config
-        self.db = WeatherDatabase(config.DATABASE_PATH)
         self.api_client = HKOApiClient(
             base_url=config.HKO_API_URL,
             aws_datafile=config.AWS_DATAFILE,
@@ -36,8 +39,11 @@ class WeatherPoller:
         if raw_data is not None:
             readings = self.api_client.parse_temperatures(raw_data, self.config.STATION_WHITELIST)
             if readings:
-                self.db.insert_batch(readings)
-                total += len(readings)
+                records = [(r["station_name"], {
+                    "temperature": r["temperature"],
+                    "recorded_at": r["recorded_at"].strftime("%Y/%m/%d %H:%M")
+                }) for r in readings]
+                total += bulk_insert_readings(records)
 
         # Fetch and store historical data
         logger.info("Polling historical temperatures...")
@@ -45,8 +51,11 @@ class WeatherPoller:
         if past_data is not None:
             past_readings = self.api_client.parse_past_temperatures(past_data, self.config.STATION_WHITELIST)
             if past_readings:
-                self.db.insert_batch(past_readings)
-                total += len(past_readings)
+                records = [(r["station_name"], {
+                    "temperature": r["temperature"],
+                    "recorded_at": r["recorded_at"].strftime("%Y/%m/%d %H:%M")
+                }) for r in past_readings]
+                total += bulk_insert_readings(records)
 
         # Fetch and store forecasts for key stations
         logger.info("Polling forecasts...")
@@ -60,12 +69,34 @@ class WeatherPoller:
 
                 daily = self.api_client.parse_daily_forecast(forecast_data)
                 if daily:
-                    self.db.insert_daily_forecasts_batch(daily)
+                    daily_records = [
+                        (
+                            r["station_code"].upper(),
+                            r["forecast_date"].strftime("%Y%m%d"),
+                            r["max_temperature"],
+                            r["min_temperature"],
+                            r["chance_of_rain"],
+                            r["weather_code"],
+                            None, None,
+                        ) for r in daily
+                    ]
+                    bulk_insert_forecasts_daily(daily_records)
                     forecast_count += len(daily)
 
                 hourly = self.api_client.parse_hourly_forecast(forecast_data)
                 if hourly:
-                    self.db.insert_hourly_forecasts_batch(hourly)
+                    hourly_records = [
+                        (
+                            r["station_code"].upper(),
+                            r["forecast_time"].strftime("%Y%m%d%H%M") if r["forecast_time"] else "",
+                            r["temperature"],
+                            float(r["humidity"]) if r["humidity"] is not None else None,
+                            float(r["wind_speed"]) if r["wind_speed"] is not None else None,
+                            float(r["wind_direction"]) if r["wind_direction"] is not None else None,
+                            None, None,
+                        ) for r in hourly
+                    ]
+                    bulk_insert_forecasts_hourly(hourly_records)
                     forecast_count += len(hourly)
             except Exception as e:
                 logger.error(f"Forecast error for {station}: {e}")

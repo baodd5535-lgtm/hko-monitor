@@ -44,7 +44,7 @@ def log_trigger(trigger_type: str, message: str):
     logger.info(f"[TRIGGER:{trigger_type}] {message}")
     try:
         import sqlite3
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_connection()
         conn.execute(
             "INSERT INTO trigger_log (timestamp, type, message) VALUES (?, ?, ?)",
             (ts, trigger_type, message)
@@ -155,7 +155,7 @@ class WeatherTradingEngine:
         HKT = timezone(timedelta(hours=8))
 
         # Verify required tables exist
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_connection()
         tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
         if 'market_outcomes' not in tables:
             logger.error("market_outcomes table missing — run seed_markets.py first")
@@ -314,7 +314,7 @@ class WeatherTradingEngine:
         if not self.book_manager:
             return
         # Get all token IDs from orderbook state
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_connection()
         tokens = conn.execute(
             "SELECT DISTINCT yes_token_id FROM market_outcomes"
         ).fetchall()
@@ -648,7 +648,7 @@ class WeatherTradingEngine:
                 )
 
                 # Get all outcomes
-                conn = sqlite3.connect(DB_PATH)
+                conn = get_connection()
                 outcomes = conn.execute(
                     "SELECT yes_token_id, outcome_name, temp_min, temp_max "
                     "FROM market_outcomes WHERE condition_id = ?",
@@ -739,10 +739,10 @@ class WeatherTradingEngine:
                     continue
 
                 # Check if we already have a NO position on this condition
-                conn = sqlite3.connect(DB_PATH)
+                conn = get_connection()
                 existing = conn.execute(
-                    "SELECT COUNT(*) FROM positions "
-                    "WHERE market_id = ? AND side = 'NO' AND status = 'OPEN'",
+                    "SELECT COUNT(*) FROM paper_positions "
+                    "WHERE condition_id = ? AND side = 'NO' AND status = 'OPEN'",
                     (condition_id,)
                 ).fetchone()[0]
                 conn.close()
@@ -764,7 +764,7 @@ class WeatherTradingEngine:
 
                 # Kelly sizing
                 kelly_frac = max(0, 0.25 * edge / (1.0 - best['market_yes']))
-                conn = sqlite3.connect(DB_PATH)
+                conn = get_connection()
                 balance = conn.execute(
                     "SELECT cash_balance FROM accounts "
                     "WHERE account_id = 'paper_user'"
