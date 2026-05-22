@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.egg-info/
+data/
+hko_weather.db
