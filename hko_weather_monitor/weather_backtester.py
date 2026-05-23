@@ -3,20 +3,11 @@ Backtesting engine with real HKO outcome resolution.
 Matches Polymarket categorical markets against actual HKO observations.
 """
 import re
-import sqlite3
 import math
 from datetime import datetime, timedelta
 from collections import defaultdict
 
-
-DB_PATH = "hko_weather_monitor/hko_weather_monitor/data/hko_weather.db"
-
-
-def get_connection():
-    """Get SQLite database connection."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+from hko_weather_monitor.db import get_connection
 
 
 def gaussian_cdf(z):
@@ -72,16 +63,19 @@ def fetch_hko_actual_max_temp(target_date: str) -> float:
         return float(row['temperature'])
     
     # Fallback: use daily max from forecast_daily if observations not available
-    cursor2 = get_connection().cursor()
-    forecast_date = date_obj.strftime("%Y%m%d")
-    cursor2.execute("""
-        SELECT max_temperature FROM forecast_daily 
-        WHERE forecast_date = ? 
-        ORDER BY id DESC LIMIT 1
-    """, (forecast_date,))
-    
-    row2 = cursor2.fetchone()
-    conn.close()
+    fallback_conn = get_connection()
+    try:
+        cursor2 = fallback_conn.cursor()
+        forecast_date = date_obj.strftime("%Y%m%d")
+        cursor2.execute("""
+            SELECT max_temperature FROM forecast_daily 
+            WHERE forecast_date = ? 
+            ORDER BY id DESC LIMIT 1
+        """, (forecast_date,))
+        
+        row2 = cursor2.fetchone()
+    finally:
+        fallback_conn.close()
     
     if row2:
         return float(row2['max_temperature'])
@@ -137,126 +131,126 @@ def run_backtest_evaluation():
     Skips unresolved markets (future dates with no observations).
     """
     conn = get_connection()
-    cursor = conn.cursor()
-    
-    # Get all market ticks with market info
-    cursor.execute("""
-        SELECT mt.tick_id, mt.condition_id, mt.timestamp, 
-               mt.polymarket_yes_price, mt.polymarket_no_price,
-               mt.hko_predicted_value, mt.model_calculated_prob, 
-               mt.generated_signal,
-               m.target_date, m.title
-        FROM market_ticks mt
-        LEFT JOIN markets m ON mt.condition_id = m.condition_id
-        ORDER BY mt.timestamp DESC
-        LIMIT 500
-    """)
-    
-    ticks = cursor.fetchall()
-    if not ticks:
+    try:
+        cursor = conn.cursor()
+        
+        # Get all market ticks with market info
+        cursor.execute("""
+            SELECT mt.tick_id, mt.condition_id, mt.timestamp, 
+                   mt.polymarket_yes_price, mt.polymarket_no_price,
+                   mt.hko_predicted_value, mt.model_calculated_prob, 
+                   mt.generated_signal,
+                   m.target_date, m.title
+            FROM market_ticks mt
+            LEFT JOIN markets m ON mt.condition_id = m.condition_id
+            ORDER BY mt.timestamp DESC
+            LIMIT 500
+        """)
+        
+        ticks = cursor.fetchall()
+        if not ticks:
+            return {"error": "No market ticks found", "total_ticks_evaluated": 0}
+        
+        # Get all outcome buckets per condition_id
+        cursor.execute("""
+            SELECT condition_id, outcome_name, temp_min, temp_max 
+            FROM market_outcomes
+        """)
+        all_outcomes = cursor.fetchall()
+        outcomes_by_condition = {}
+        for row in all_outcomes:
+            cond = row['condition_id']
+            if cond not in outcomes_by_condition:
+                outcomes_by_condition[cond] = []
+            outcomes_by_condition[cond].append({
+                'outcome_name': row['outcome_name'],
+                'temp_min': row['temp_min'],
+                'temp_max': row['temp_max']
+            })
+        
+        total_brier_loss = 0.0
+        total_ticks = 0
+        buy_signals = 0
+        sell_signals = 0
+        hold_signals = 0
+        correct_predictions = 0
+        edges = []
+        skipped_unresolved = 0
+        
+        for tick in ticks:
+            condition_id = tick['condition_id']
+            target_date = tick['target_date']
+            
+            # Extract date from target_date (format varies)
+            date_match = re.search(r'\d{4}-\d{2}-\d{2}', target_date or '')
+            if not date_match:
+                skipped_unresolved += 1
+                continue
+            
+            date_str = date_match.group(0)
+            
+            # Fetch actual max temp for that date
+            try:
+                actual_temp = fetch_hko_actual_max_temp(date_str)
+            except ValueError:
+                # No observation yet (future date or missing data)
+                skipped_unresolved += 1
+                continue
+            
+            # Determine winning bucket
+            winning_bucket = determine_temperature_bucket(actual_temp)
+            
+            # Count signals
+            signal = tick['generated_signal'] or 'HOLD'
+            if signal == 'BUY':
+                buy_signals += 1
+            elif signal == 'SELL':
+                sell_signals += 1
+            else:
+                hold_signals += 1
+            
+            model_prob = tick['model_calculated_prob'] or 0
+            market_price = tick['polymarket_yes_price'] or 0
+            predicted_temp = tick['hko_predicted_value'] or 0
+            predicted_bucket = determine_temperature_bucket(predicted_temp)
+            
+            # Edge calculation
+            edge = model_prob - market_price
+            edges.append(edge)
+            
+            # TRUE Brier score: compare model_prob against actual outcome
+            # The tick represents a prediction for ONE outcome bucket
+            # actual_outcome = 1 if this tick's predicted bucket = winning bucket, else 0
+            actual_outcome = 1.0 if predicted_bucket == winning_bucket else 0.0
+            brier_loss = (model_prob - actual_outcome) ** 2
+            total_brier_loss += brier_loss
+            
+            # Win rate: did the model's most confident bucket match reality?
+            if predicted_bucket == winning_bucket:
+                correct_predictions += 1
+            
+            total_ticks += 1
+        
+        # Calculate metrics
+        brier_score = total_brier_loss / total_ticks if total_ticks > 0 else 0
+        win_rate = correct_predictions / total_ticks if total_ticks > 0 else 0
+        mean_edge = sum(edges) / len(edges) if edges else 0
+        abs_mean_edge = sum(abs(e) for e in edges) / len(edges) if edges else 0
+        
+        return {
+            "total_ticks_evaluated": total_ticks,
+            "skipped_unresolved": skipped_unresolved,
+            "buy_signals": buy_signals,
+            "sell_signals": sell_signals,
+            "hold_signals": hold_signals,
+            "brier_score": round(brier_score, 4),
+            "win_rate": round(win_rate * 100, 2),
+            "mean_edge": round(mean_edge, 4),
+            "abs_mean_edge": round(abs_mean_edge, 4),
+            "correct_predictions": correct_predictions
+        }
+    finally:
         conn.close()
-        return {"error": "No market ticks found", "total_ticks_evaluated": 0}
-    
-    # Get all outcome buckets per condition_id
-    cursor.execute("""
-        SELECT condition_id, outcome_name, temp_min, temp_max 
-        FROM market_outcomes
-    """)
-    all_outcomes = cursor.fetchall()
-    outcomes_by_condition = {}
-    for row in all_outcomes:
-        cond = row['condition_id']
-        if cond not in outcomes_by_condition:
-            outcomes_by_condition[cond] = []
-        outcomes_by_condition[cond].append({
-            'outcome_name': row['outcome_name'],
-            'temp_min': row['temp_min'],
-            'temp_max': row['temp_max']
-        })
-    
-    total_brier_loss = 0.0
-    total_ticks = 0
-    buy_signals = 0
-    sell_signals = 0
-    hold_signals = 0
-    correct_predictions = 0
-    edges = []
-    skipped_unresolved = 0
-    
-    for tick in ticks:
-        condition_id = tick['condition_id']
-        target_date = tick['target_date']
-        
-        # Extract date from target_date (format varies)
-        date_match = re.search(r'\d{4}-\d{2}-\d{2}', target_date or '')
-        if not date_match:
-            skipped_unresolved += 1
-            continue
-        
-        date_str = date_match.group(0)
-        
-        # Fetch actual max temp for that date
-        try:
-            actual_temp = fetch_hko_actual_max_temp(date_str)
-        except ValueError:
-            # No observation yet (future date or missing data)
-            skipped_unresolved += 1
-            continue
-        
-        # Determine winning bucket
-        winning_bucket = determine_temperature_bucket(actual_temp)
-        
-        # Count signals
-        signal = tick['generated_signal'] or 'HOLD'
-        if signal == 'BUY':
-            buy_signals += 1
-        elif signal == 'SELL':
-            sell_signals += 1
-        else:
-            hold_signals += 1
-        
-        model_prob = tick['model_calculated_prob'] or 0
-        market_price = tick['polymarket_yes_price'] or 0
-        predicted_temp = tick['hko_predicted_value'] or 0
-        predicted_bucket = determine_temperature_bucket(predicted_temp)
-        
-        # Edge calculation
-        edge = model_prob - market_price
-        edges.append(edge)
-        
-        # TRUE Brier score: compare model_prob against actual outcome
-        # The tick represents a prediction for ONE outcome bucket
-        # actual_outcome = 1 if this tick's predicted bucket = winning bucket, else 0
-        actual_outcome = 1.0 if predicted_bucket == winning_bucket else 0.0
-        brier_loss = (model_prob - actual_outcome) ** 2
-        total_brier_loss += brier_loss
-        
-        # Win rate: did the model's most confident bucket match reality?
-        if predicted_bucket == winning_bucket:
-            correct_predictions += 1
-        
-        total_ticks += 1
-    
-    conn.close()
-    
-    # Calculate metrics
-    brier_score = total_brier_loss / total_ticks if total_ticks > 0 else 0
-    win_rate = correct_predictions / total_ticks if total_ticks > 0 else 0
-    mean_edge = sum(edges) / len(edges) if edges else 0
-    abs_mean_edge = sum(abs(e) for e in edges) / len(edges) if edges else 0
-    
-    return {
-        "total_ticks_evaluated": total_ticks,
-        "skipped_unresolved": skipped_unresolved,
-        "buy_signals": buy_signals,
-        "sell_signals": sell_signals,
-        "hold_signals": hold_signals,
-        "brier_score": round(brier_score, 4),
-        "win_rate": round(win_rate * 100, 2),
-        "mean_edge": round(mean_edge, 4),
-        "abs_mean_edge": round(abs_mean_edge, 4),
-        "correct_predictions": correct_predictions
-    }
 
 
 if __name__ == "__main__":
