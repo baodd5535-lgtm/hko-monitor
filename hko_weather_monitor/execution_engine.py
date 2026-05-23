@@ -207,7 +207,7 @@ class PaperExecutionEngine:
         cursor.execute("""
             SELECT pp.condition_id, pp.token_id, pp.qty, pp.avg_entry_price
             FROM paper_positions pp
-            WHERE pp.qty > 0
+            WHERE pp.qty != 0 AND pp.status != 'CLOSED'
         """)
         positions = cursor.fetchall()
         

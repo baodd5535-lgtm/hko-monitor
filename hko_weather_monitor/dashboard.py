@@ -1004,8 +1004,8 @@ HTML = """<!DOCTYPE html>
                 document.getElementById('status').textContent =
                     `Observations: ${readings[0]?.recorded_at} HKT | ${readings.length} stations | ${history.length} records`;
                 renderCards(readings);
-                if (currentSubTab === 'chart') renderChart(history);
-                if (currentSubTab === 'table') loadTable(true);
+                if (currentSubTab === 'chart') renderChart(history, true);
+                if (currentSubTab === 'table') loadTable();
                 forecastStationCodes = codes;
 
                 // Update forecast station selector — use codes as values, names as labels
@@ -1217,7 +1217,7 @@ HTML = """<!DOCTYPE html>
                 }
                 
                 // Update last-refresh timestamp
-                const statusEl = document.getElementById('obs-status');
+                const statusEl = document.getElementById('status');
                 if (statusEl) {
                     const now = new Date();
                     const hktTime = new Date(now.getTime() + 8 * 3600 * 1000);
