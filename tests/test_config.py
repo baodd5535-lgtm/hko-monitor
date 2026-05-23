@@ -21,7 +21,7 @@ def test_config_loads_defaults(monkeypatch):
     assert c.MAX_RETRIES == 3
     assert c.RETRY_BACKOFF_FACTOR == 1.0
     assert c.POLL_INTERVAL_SECONDS == 300
-    assert c.DATABASE_PATH == "weather_data.db"
+    assert c.DATABASE_PATH == os.path.join(os.path.dirname(config.__file__), "data", "hko_weather.db")
     assert c.LOG_LEVEL == "INFO"
     assert c.LOG_FILE == "hko_monitor.log"
     assert c.STATION_WHITELIST == []
