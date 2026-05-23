@@ -1005,7 +1005,7 @@ HTML = """<!DOCTYPE html>
                     `Observations: ${readings[0]?.recorded_at} HKT | ${readings.length} stations | ${history.length} records`;
                 renderCards(readings);
                 if (currentSubTab === 'chart') renderChart(history, true);
-                if (currentSubTab === 'table') loadTable();
+                if (currentSubTab === 'table' && tableOffset === 0) loadTable(true);
                 forecastStationCodes = codes;
 
                 // Update forecast station selector — use codes as values, names as labels
@@ -1609,9 +1609,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                                     'S','SSW','SW','WSW','W','WNW','NW','NNW']
                             wind_dirs.append(dirs[round(deg / 22.5) % 16])
 
+                    wind_speed_kmh = 0.0
                     if hourly:
                         humidity_avg /= len(hourly)
                         wind_speed_avg /= len(hourly)
+                        # Convert m/s to km/h for threshold comparison
+                        wind_speed_kmh = wind_speed_avg * 3.6
 
                     # Humidity adjustment
                     humidity_adj = 0.0
@@ -1621,9 +1624,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # Wind adjustment
                     wind_adj = 0.0
                     dominant_dir = max(set(wind_dirs), key=wind_dirs.count) if wind_dirs else 'E'
-                    if dominant_dir in ['E', 'SE'] and wind_speed_avg > 15.0:
+                    if dominant_dir in ['E', 'SE'] and wind_speed_kmh > 15.0:
                         wind_adj = -0.5
-                    elif dominant_dir in ['N', 'NW'] and wind_speed_avg < 10.0:
+                    elif dominant_dir in ['N', 'NW'] and wind_speed_kmh < 10.0:
                         wind_adj = 0.6
 
                     # UV adjustment
@@ -1655,7 +1658,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         'peak_uv': uv_peak,
                         'uv_level': uv_level,
                         'adjusted_temp': adjusted_temp,
-                        'details': f'Cloud:{cloud_cov:.0f}% Wind:{dominant_dir} {wind_speed_avg:.0f}km/h RH:{humidity_avg:.0f}% Rain:{daily["chance_of_rain"] or 0}% UV:{uv_peak} ({uv_level})',
+                        'details': f'Cloud:{cloud_cov:.0f}% Wind:{dominant_dir} {wind_speed_avg:.1f}m/s RH:{humidity_avg:.0f}% Rain:{daily["chance_of_rain"] or 0}% UV:{uv_peak} ({uv_level})',
                     })
             except Exception:
                 pass
