@@ -1,0 +1,40 @@
+# ============================================================
+# HKO Weather Trading Engine Service
+# ============================================================
+# What it does:
+#   Event-driven weather trading engine that runs the full pipeline:
+#   1. Persistent WebSocket to Polymarket CLOB (real-time orderbook tracking)
+#   2. 30-min HKO forecast sync (multi-factor: temp, humidity, wind, rain, clouds)
+#   3. Three triggers fire scoring + execution:
+#      - Price momentum > 2¢ over 10-min window
+#      - 30-min heartbeat (re-score everything, check risk)
+#      - HKO forecast update detected (Last-Modified header change)
+#
+# Code:    /shared-hermes/hko-monitor/hko_weather_monitor/engine.py
+# Module:  hko_weather_monitor.engine  (entry: run_engine())
+# DB:      /shared-hermes/hko-monitor/hko_weather_monitor/data/hko_weather.db
+# Dashboard (separate service): hko-weather.service on port 8765
+#
+# Start:   sudo systemctl start hko-weather-engine.service
+# Logs:    journalctl -u hko-weather-engine.service -f
+# Seed DB: cd /shared-hermes/hko-monitor && python3 -m hko_weather_monitor.seed_markets
+# ============================================================
+
+[Unit]
+Description=HKO Weather Trading Engine (Event-driven + WebSocket)
+After=network-online.target hko-weather.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermes-runner
+Group=hermes-runner
+WorkingDirectory=/shared-hermes/hko-monitor
+ExecStart=/usr/bin/python3 -m hko_weather_monitor.engine
+Restart=always
+RestartSec=10
+Environment=HOME=/home/hermes-runner
+Environment=PATH=/home/hermes-runner/.hermes/hermes-agent/venv/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target

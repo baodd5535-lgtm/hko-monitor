@@ -1,13 +1,37 @@
+# ============================================================
+# HKO Weather Dashboard Service
+# ============================================================
+# What it does:
+#   HTTP dashboard for the HKO weather trading system. Serves:
+#   - Live temperature readings & forecasts (HKO data)
+#   - Paper trading positions, fills, orderbook state
+#   - Nine-day forecast visualization
+#   - UV index data
+#   Port: 8765
+#
+# Code:    /shared-hermes/hko-monitor/hko_weather_monitor/dashboard.py
+# Module:  hko_weather_monitor.dashboard (ThreadedHTTPServer)
+# DB:      /shared-hermes/hko-monitor/hko_weather_monitor/data/hko_weather.db
+# Engine (separate service): hko-weather-engine.service (WebSocket + trading)
+#
+# Start:   sudo systemctl start hko-weather.service
+# Logs:    journalctl -u hko-weather.service -f
+# Access:  http://localhost:8765
+#
+# Note: Active systemd service is at /etc/systemd/system/hko-weather.service.
+#   These repo copies are source-of-truth for future updates.
+# ============================================================
+
 [Unit]
-Description=HKO Weather Monitor & Polymarket Paper Trading System
-After=network.target
+Description=HKO Weather Monitor (Dashboard)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=hermes-runner
 Group=hermes-runner
-WorkingDirectory=/shared-hermes/hko_weather_monitor
-Environment="PYTHONPATH=/shared-hermes/hko_weather_monitor"
+WorkingDirectory=/shared-hermes/hko-monitor
 ExecStart=/usr/bin/python3 -m hko_weather_monitor.dashboard
 Restart=on-failure
 RestartSec=30
