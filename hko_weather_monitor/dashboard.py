@@ -412,7 +412,7 @@ HTML = """<!DOCTYPE html>
             
             <!-- NO Positions -->
             <div style="margin-bottom:20px">
-                <h4 style="color:#ccc;margin-bottom:12px">📉 Active NO Positions (Short YES)</h4>
+                <h4 style="color:#ccc;margin-bottom:12px">📉 NO Positions (Short YES) — All</h4>
                 <table style="width:100%;border-collapse:collapse" id="no-positions-table">
                     <thead>
                         <tr style="border-bottom:1px solid #333">
