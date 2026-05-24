@@ -422,6 +422,7 @@ HTML = """<!DOCTYPE html>
                             <th style="text-align:right;padding:8px;color:#888">Entry Price</th>
                             <th style="text-align:right;padding:8px;color:#888">Current Price</th>
                             <th style="text-align:right;padding:8px;color:#888">P&L</th>
+                            <th style="text-align:left;padding:8px;color:#888">Status</th>
                             <th style="text-align:left;padding:8px;color:#888">Trigger</th>
                         </tr>
                     </thead>
