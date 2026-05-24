@@ -1317,13 +1317,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 for event in data:
                     event['expected_temp'] = compute_expected_temp(event.get('outcomes', []))
             self._json_response(data or [])
-        elif parsed.path == '/api/polymarket_hko_ref':
-            # Legacy endpoint (kept for backward compat)
-            readings = get_latest_readings()
-            hko = next((r for r in readings if r['name'] == 'HK Observatory'), None)
-            self._json_response({
-                'hkoTemp': hko['temperature'] if hko else None,
-            })
         elif parsed.path == '/api/paper_trading':
             # Paper trading summary
             from hko_weather_monitor.execution_engine import PaperExecutionEngine
@@ -1333,51 +1326,52 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         elif parsed.path == '/api/live_orderbook':
             # Live orderbook data for all active market outcomes
             conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            
-            # Fetch all outcomes in one query
-            cursor.execute("""
-                SELECT mo.condition_id, mo.outcome_name, mo.yes_token_id,
-                       m.target_date, m.title
-                FROM market_outcomes mo
-                JOIN markets m ON mo.condition_id = m.condition_id
-                WHERE m.status = 'ACTIVE'
-                ORDER BY m.target_date, mo.id
-            """)
-            outcomes = cursor.fetchall()
-            
-            # Batch-fetch latest orderbook for all tokens at once
-            token_ids = [row[2] for row in outcomes if row[2]]
-            latest_book = {}
-            if token_ids:
-                placeholders = ','.join(['?' for _ in token_ids])
-                cursor.execute(f"""
-                    SELECT token_id, best_bid, best_ask, updated_at
-                    FROM orderbook_state
-                    WHERE token_id IN ({placeholders})
-                """, token_ids)
-                # Keep only the latest entry per token
-                for row in cursor.fetchall():
-                    tid = row[0]
-                    if tid not in latest_book or (row[3] or '') > (latest_book[tid][3] or ''):
-                        latest_book[tid] = row
-            
-            conn.close()
-            
-            live_book = []
-            for row in outcomes:
-                token_id = row[2]
-                book = latest_book.get(token_id)
-                live_book.append({
-                    'condition_id': row[0],
-                    'outcome_name': row[1],
-                    'token_id': token_id,
-                    'best_bid': book[1] if book else None,
-                    'best_ask': book[2] if book else None,
-                    'updated_at': book[3] if book else None,
-                })
-            
-            self._json_response(live_book)
+            try:
+                cursor = conn.cursor()
+                
+                # Fetch all outcomes in one query
+                cursor.execute("""
+                    SELECT mo.condition_id, mo.outcome_name, mo.yes_token_id,
+                           m.target_date, m.title
+                    FROM market_outcomes mo
+                    JOIN markets m ON mo.condition_id = m.condition_id
+                    WHERE m.status = 'ACTIVE'
+                    ORDER BY m.target_date, mo.id
+                """)
+                outcomes = cursor.fetchall()
+                
+                # Batch-fetch latest orderbook for all tokens at once
+                token_ids = [row[2] for row in outcomes if row[2]]
+                latest_book = {}
+                if token_ids:
+                    placeholders = ','.join(['?' for _ in token_ids])
+                    cursor.execute(f"""
+                        SELECT token_id, best_bid, best_ask, updated_at
+                        FROM orderbook_state
+                        WHERE token_id IN ({placeholders})
+                    """, token_ids)
+                    # Keep only the latest entry per token
+                    for row in cursor.fetchall():
+                        tid = row[0]
+                        if tid not in latest_book or (row[3] or '') > (latest_book[tid][3] or ''):
+                            latest_book[tid] = row
+                
+                live_book = []
+                for row in outcomes:
+                    token_id = row[2]
+                    book = latest_book.get(token_id)
+                    live_book.append({
+                        'condition_id': row[0],
+                        'outcome_name': row[1],
+                        'token_id': token_id,
+                        'best_bid': book[1] if book else None,
+                        'best_ask': book[2] if book else None,
+                        'updated_at': book[3] if book else None,
+                    })
+                
+                self._json_response(live_book)
+            finally:
+                conn.close()
         elif parsed.path == '/api/polymarket_hko_daily':
             # Per-day aggregates: daily forecast + hourly wind stats + 9-day forecast
             from datetime import date as _date
@@ -1498,9 +1492,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                            pp.avg_entry_price, pp.opened_at, pp.status,
                            mo.outcome_name, m.target_date, m.title
                     FROM paper_positions pp
-                    JOIN market_outcomes mo ON pp.condition_id = mo.condition_id
+                    JOIN market_outcomes mo ON pp.token_id = mo.yes_token_id
                     LEFT JOIN markets m ON pp.condition_id = m.condition_id
-                    WHERE pp.side = 'NO' AND pp.qty != 0
+                    WHERE pp.side = 'NO'
                     ORDER BY pp.id DESC LIMIT 50
                 """).fetchall()
 
@@ -1637,6 +1631,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     import hko_weather_monitor.uv_fetcher as _uv
                     uv_peak = _uv.get_peak_uv_index(date_hko)
                     uv_adj = _uv.get_uv_forecast_adjustment(uv_peak)
+                    # None safety: ensure all adjustments are numeric before math
+                    uv_adj = uv_adj if uv_adj is not None else 0.0
+                    cloud_adj = cloud_adj if cloud_adj is not None else 0.0
+                    wind_adj = wind_adj if wind_adj is not None else 0.0
+                    humidity_adj = humidity_adj if humidity_adj is not None else 0.0
                     if uv_peak is not None and uv_peak <= 2:
                         uv_level = 'low'
                     elif uv_peak is not None and uv_peak <= 5:
