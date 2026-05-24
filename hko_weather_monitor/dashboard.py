@@ -1495,13 +1495,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             try:
                 rows = conn.execute("""
                     SELECT pp.condition_id, pp.token_id, pp.qty,
-                           pp.avg_entry_price, pp.opened_at,
+                           pp.avg_entry_price, pp.opened_at, pp.status,
                            mo.outcome_name, m.target_date, m.title
                     FROM paper_positions pp
                     JOIN market_outcomes mo ON pp.condition_id = mo.condition_id
                     LEFT JOIN markets m ON pp.condition_id = m.condition_id
                     WHERE pp.side = 'NO' AND pp.qty != 0
-                    ORDER BY pp.id DESC
+                    ORDER BY pp.id DESC LIMIT 50
                 """).fetchall()
 
                 # Get current prices from orderbook_state
@@ -1535,8 +1535,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         'entry_price': entry,
                         'current_price': cp,
                         'pnl': pnl,
-                        'status': row.get('status', 'OPEN'),
-                        'trigger': row['opened_at'][-8:-3] if row.get('opened_at') else '',
+                        'status': row['status'] if row['status'] else 'OPEN',
+                        'trigger': row['opened_at'][-8:-3] if row['opened_at'] else '',
                     })
             except Exception as e:
                 pass
