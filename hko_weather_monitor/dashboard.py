@@ -1163,18 +1163,20 @@ HTML = """<!DOCTYPE html>
                 posBody.innerHTML = data.no_positions.map(p => {
                     const pnl = p.pnl;
                     const pnlColor = pnl > 0 ? '#4caf50' : pnl < 0 ? '#f44336' : '#888';
-                    return `<tr style="border-bottom:1px solid #1a1a2e">
+                    const statusColor = p.status === 'OPEN' ? '#4caf50' : '#666';
+                    return `<tr style="border-bottom:1px solid #1a1a2e; ${p.status !== 'OPEN' ? 'opacity:0.6' : ''}">
                         <td style="padding:8px;color:#ccc">${p.market}</td>
                         <td style="padding:8px;color:#fff;font-weight:bold">${p.bucket}</td>
                         <td style="padding:8px;text-align:right;color:#e040fb">${p.qty.toFixed(2)}</td>
                         <td style="padding:8px;text-align:right;color:#aaa">$${p.entry_price.toFixed(4)}</td>
                         <td style="padding:8px;text-align:right;color:#ccc">$${p.current_price ? p.current_price.toFixed(4) : 'N/A'}</td>
                         <td style="padding:8px;text-align:right;color:${pnlColor};font-weight:bold">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</td>
+                        <td style="padding:8px;color:${statusColor};font-weight:bold;font-size:11px">${p.status}</td>
                         <td style="padding:8px;color:#666;font-size:11px">${p.trigger || 'N/A'}</td>
                     </tr>`;
                 }).join('');
             } else if (posBody) {
-                posBody.innerHTML = '<tr><td colspan="7" style="padding:20px;text-align:center;color:#666">No active NO positions yet</td></tr>';
+                posBody.innerHTML = '<tr><td colspan="8" style="padding:20px;text-align:center;color:#666">No NO positions yet</td></tr>';
             }
         }
 
@@ -1497,7 +1499,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     FROM paper_positions pp
                     JOIN market_outcomes mo ON pp.condition_id = mo.condition_id
                     LEFT JOIN markets m ON pp.condition_id = m.condition_id
-                    WHERE pp.side = 'NO' AND pp.status = 'OPEN'
+                    WHERE pp.side = 'NO' AND pp.qty != 0
                     ORDER BY pp.id DESC
                 """).fetchall()
 
@@ -1532,7 +1534,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         'entry_price': entry,
                         'current_price': cp,
                         'pnl': pnl,
-                        'trigger': row['opened_at'][-8:-3] if row['opened_at'] else '',
+                        'status': row.get('status', 'OPEN'),
+                        'trigger': row['opened_at'][-8:-3] if row.get('opened_at') else '',
                     })
             except Exception as e:
                 pass
