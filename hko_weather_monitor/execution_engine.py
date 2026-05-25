@@ -275,11 +275,11 @@ class PaperExecutionEngine:
             
             html = f'<div style="padding:15px;background:#1a1a2e;border:1px solid #333;border-radius:8px;margin-bottom:15px"><div style="color:#888;font-size:14px">Available Balance</div><div style="font-size:28px;color:#4caf50">${balance:,.2f}</div></div>'
             
+            # === POSITIONS ===
+            html += "<div style='font-weight:bold;color:#fff;margin:12px 0 8px'>📊 Current Positions</div>"
             if not positions:
                 html += '<div style="color:#888;padding:20px;">No active positions.</div>'
             else:
-                # === POSITIONS ===
-                html += "<div style='font-weight:bold;color:#fff;margin-bottom:8px'>📊 Current Positions</div>"
                 html += "<table border='1' style='border-collapse:collapse;width:100%;border-color:#333'>"
                 html += "<tr style='background:#16213e'><th style='padding:6px;font-size:12px'>Market</th><th style='padding:6px;font-size:12px'>Outcome</th><th style='padding:6px;font-size:12px;text-align:right'>Shares</th><th style='padding:6px;font-size:12px;text-align:right'>Avg Entry</th><th style='padding:6px;font-size:12px;text-align:right'>Current</th><th style='padding:6px;font-size:12px;text-align:right'>PnL</th></tr>"
                 
