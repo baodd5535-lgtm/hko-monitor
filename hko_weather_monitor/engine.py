@@ -123,8 +123,8 @@ class WeatherTradingEngine:
         self.last_heartbeat = 0.0
         self.last_rescore = 0.0
         self.rescore_cooldown = 120          # Don't re-score more than once per 2 min
-        self._momentum_last_fire: Dict[str, float] = {}  # token_id -> last trigger time
-        self._momentum_token_cooldown = 60    # Per-token: don't re-fire for 60s
+        self._momentum_last_trigger: Dict[str, float] = {}  # token_id -> last trigger time
+        self._momentum_per_token_cooldown = 120  # Don't re-trigger same token for 2 min
 
         # HKO state
         self.hko_forecasts = {}              # date_iso -> {max_temp, humidity, ...}
@@ -285,13 +285,13 @@ class WeatherTradingEngine:
             if abs(momentum) >= self.price_momentum_threshold:
                 now = time.time()
                 # Per-token cooldown: prevent same token from spamming rescores
-                last_token_trigger = self._momentum_last_fire.get(token_id, 0)
-                if now - last_token_trigger < self._momentum_token_cooldown:
+                last_token_trigger = self._momentum_last_trigger.get(token_id, 0)
+                if now - last_token_trigger < self._momentum_per_token_cooldown:
                     return
                 # Global re-score cooldown (prevents DB flooding)
                 if now - self.last_rescore < self.rescore_cooldown:
                     return
-                self._momentum_last_fire[token_id] = now
+                self._momentum_last_trigger[token_id] = now
                 self.last_rescore = now
                 logger.info(f"[MOMENTUM] {token_id[:20]}...: price delta = {momentum:.4f}")
                 log_trigger('momentum', f"Token {token_id[:20]}... delta={momentum:.4f}")
