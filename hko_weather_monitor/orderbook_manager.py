@@ -25,7 +25,6 @@ class PolymarketOrderbookManager:
         self.running = False
         self.condition_id = None
         self.on_price_update = None  # Optional callback: (token_id, best_bid, best_ask) -> None
-        self.on_price_update = None  # Optional callback: (token_id, best_bid, best_ask) -> None
         
     def _get_tokens_for_condition(self, condition_id):
         """Query market_outcomes table for all token IDs for a condition."""

@@ -39,20 +39,21 @@ logger = logging.getLogger(__name__)
 def log_trigger(trigger_type: str, message: str):
     """Log a trigger event to the trigger_log table and console."""
     import time
-    from hko_weather_monitor.db import DB_PATH
     ts = time.time()
     logger.info(f"[TRIGGER:{trigger_type}] {message}")
+    conn = None
     try:
-        import sqlite3
         conn = get_connection()
         conn.execute(
             "INSERT INTO trigger_log (timestamp, type, message) VALUES (?, ?, ?)",
             (ts, trigger_type, message)
         )
         conn.commit()
-        conn.close()
     except Exception:
         pass
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _weather_code_to_cloud_coverage(code: int) -> float:
@@ -134,8 +135,18 @@ class WeatherTradingEngine:
 
     async def start(self):
         """Start the hybrid engine."""
+        import os
         self.running = True
         import asyncio
+
+        # Write PID file for Dashboard tracking
+        try:
+            with open('/tmp/hko_engine.pid', 'w') as pf:
+                pf.write(str(os.getpid()))
+            logger.info(f"Engine PID file written: {os.getpid()}")
+        except Exception as e:
+            logger.error(f"Failed to write PID file: {e}")
+        import os
 
         logger.info("=" * 60)
         logger.info("Starting hybrid weather trading engine...")
@@ -145,24 +156,32 @@ class WeatherTradingEngine:
         logger.info(f"  Re-score cooldown: {self.rescore_cooldown}s")
         logger.info("=" * 60)
 
+        # Write PID file for dashboard engine status tracking
+        try:
+            with open('/tmp/hko_engine.pid', 'w') as f:
+                f.write(str(os.getpid()))
+        except Exception as e:
+            logger.error(f"Failed to write engine PID file: {e}")
+
         # Load active conditions — filter out resolved & expired
         from datetime import datetime, timezone, timedelta
         HKT = timezone(timedelta(hours=8))
 
         # Verify required tables exist
         conn = get_connection()
-        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-        if 'market_outcomes' not in tables:
-            logger.error("market_outcomes table missing — run seed_markets.py first")
-            conn.close()
-            raise RuntimeError("Missing market_outcomes table")
+        try:
+            tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            if 'market_outcomes' not in tables:
+                logger.error("market_outcomes table missing — run seed_markets.py first")
+                raise RuntimeError("Missing market_outcomes table")
 
-        all_conditions = conn.execute("""
-            SELECT DISTINCT mo.condition_id, m.status
-            FROM market_outcomes mo
-            LEFT JOIN markets m ON mo.condition_id = m.condition_id
-        """).fetchall()
-        conn.close()
+            all_conditions = conn.execute("""
+                SELECT DISTINCT mo.condition_id, m.status
+                FROM market_outcomes mo
+                LEFT JOIN markets m ON mo.condition_id = m.condition_id
+            """).fetchall()
+        finally:
+            conn.close()
 
         self.active_conditions = []
         now_utc = datetime.now(timezone.utc)
@@ -208,6 +227,13 @@ class WeatherTradingEngine:
             self.running = False
             if self.book_manager:
                 self.book_manager.disconnect()
+            # Clean up PID file on exit
+            import os
+            try:
+                if os.path.exists('/tmp/hko_engine.pid'):
+                    os.remove('/tmp/hko_engine.pid')
+            except Exception:
+                pass
             logger.info("Engine stopped")
 
     async def stop(self):
@@ -263,8 +289,11 @@ class WeatherTradingEngine:
             self.tracker.record_orderbook(token_id, best_bid, best_ask)
             momentum = self.tracker.get_orderbook_momentum(token_id)
             if abs(momentum) >= self.price_momentum_threshold:
-                logger.info(f"[MOMENTUM] {token_id[:20]}...: price delta = {momentum:.4f}")
-                log_trigger('momentum', f"Token {token_id[:20]}... delta={momentum:.4f}")
+                now = time.time()
+                # Only log trigger if outside the re-score cooldown window (prevents DB flooding)
+                if now - self.last_rescore >= self.rescore_cooldown:
+                    logger.info(f"[MOMENTUM] {token_id[:20]}...: price delta = {momentum:.4f}")
+                    log_trigger('momentum', f"Token {token_id[:20]}... delta={momentum:.4f}")
                 asyncio.ensure_future(self._trigger_rescore(f"momentum:{token_id[:20]}"))
 
     # ─── HKO Forecast Sync ──────────────────────────────────────

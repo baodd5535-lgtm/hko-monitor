@@ -26,24 +26,27 @@ def load_and_clean_data():
         forecast_date (str), horizon (int), hko_pred (float), true_max (float), error (float)
     """
     conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    try:
+        conn.row_factory = sqlite3.Row
 
-    # Get daily forecasts from CCH (Cheung Chau)
-    forecasts = conn.execute("""
-        SELECT forecast_date, max_temperature as hko_pred, fetched_at
-        FROM forecast_daily
-        WHERE station_code = 'CCH' AND max_temperature IS NOT NULL
-    """).fetchall()
+        # Get daily forecasts from CCH (Cheung Chau)
+        forecasts = conn.execute("""
+            SELECT forecast_date, max_temperature as hko_pred, fetched_at
+            FROM forecast_daily
+            WHERE station_code = 'CCH' AND max_temperature IS NOT NULL
+        """).fetchall()
 
-    # Get actual daily max temps from per-minute readings for Cheung Chau
-    actuals = conn.execute("""
-        SELECT substr(r.recorded_at, 1, 10) as obs_date,
-               MAX(r.temperature) as true_max
-        FROM readings r
-        JOIN stations s ON s.id = r.station_id
-        WHERE s.name = 'Cheung Chau'
-        GROUP BY substr(r.recorded_at, 1, 10)
-    """).fetchall()
+        # Get actual daily max temps from per-minute readings for Cheung Chau
+        actuals = conn.execute("""
+            SELECT substr(r.recorded_at, 1, 10) as obs_date,
+                   MAX(r.temperature) as true_max
+            FROM readings r
+            JOIN stations s ON s.id = r.station_id
+            WHERE s.name = 'Cheung Chau'
+            GROUP BY substr(r.recorded_at, 1, 10)
+        """).fetchall()
+    finally:
+        conn.close()
 
     # Build lookup: date_str -> actual_max
     actual_lookup = {dict(a)['obs_date']: dict(a)['true_max'] for a in actuals}
@@ -83,7 +86,6 @@ def load_and_clean_data():
             'error': actual - predicted,
         })
 
-    conn.close()
     return errors
 
 
@@ -220,23 +222,24 @@ def multi_station_ensemble(all_errors=None, target_date: str = None) -> dict:
     global _weight_cache
 
     conn = sqlite3.connect(DB_PATH)
+    try:
+        if target_date is None:
+            target_date = date.today().strftime("%Y%m%d")
 
-    if target_date is None:
-        target_date = date.today().strftime("%Y%m%d")
-
-    # Deduplicate: take latest fetch per station
-    rows = conn.execute("""
-        SELECT station_code, max_temperature
-        FROM forecast_daily
-        WHERE forecast_date = ? AND max_temperature IS NOT NULL
-          AND (station_code, max_temperature, fetched_at) IN (
-              SELECT station_code, max_temperature, MAX(fetched_at)
-              FROM forecast_daily
-              WHERE forecast_date = ? AND max_temperature IS NOT NULL
-              GROUP BY station_code
-          )
-    """, (target_date, target_date)).fetchall()
-    conn.close()
+        # Deduplicate: take latest fetch per station
+        rows = conn.execute("""
+            SELECT station_code, max_temperature
+            FROM forecast_daily
+            WHERE forecast_date = ? AND max_temperature IS NOT NULL
+              AND (station_code, max_temperature, fetched_at) IN (
+                  SELECT station_code, max_temperature, MAX(fetched_at)
+                  FROM forecast_daily
+                  WHERE forecast_date = ? AND max_temperature IS NOT NULL
+                  GROUP BY station_code
+              )
+        """, (target_date, target_date)).fetchall()
+    finally:
+        conn.close()
 
     if not rows:
         return {}
@@ -288,14 +291,16 @@ def market_awareness_check() -> dict:
     Check for extreme current conditions the market might know about.
     """
     conn = sqlite3.connect(DB_PATH)
-    row = conn.execute("""
-        SELECT r.temperature, r.recorded_at
-        FROM readings r
-        JOIN stations s ON s.id = r.station_id
-        WHERE s.name = 'HK Observatory'
-        ORDER BY r.recorded_at DESC LIMIT 1
-    """).fetchone()
-    conn.close()
+    try:
+        row = conn.execute("""
+            SELECT r.temperature, r.recorded_at
+            FROM readings r
+            JOIN stations s ON s.id = r.station_id
+            WHERE s.name = 'HK Observatory'
+            ORDER BY r.recorded_at DESC LIMIT 1
+        """).fetchone()
+    finally:
+        conn.close()
 
     if row:
         temp = row[0]

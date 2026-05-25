@@ -143,19 +143,26 @@ class PaperExecutionEngine:
             if pos_res:
                 current_qty, current_avg = pos_res
                 new_qty = current_qty - filled_qty
-                if abs(new_qty) > 0.01:
-                    # Recompute weighted avg (handles both long and short)
+                
+                if abs(new_qty) < 0.01:
+                    # Position fully closed
+                    cursor.execute("""
+                        UPDATE paper_positions SET qty = 0, avg_entry_price = 0, status = 'CLOSED'
+                        WHERE account_id = ? AND condition_id = ? AND token_id = ?
+                    """, (account_id, condition_id, token_id))
+                elif current_qty > 0:
+                    # Reducing LONG position — cost basis stays constant
+                    cursor.execute("""
+                        UPDATE paper_positions SET qty = ?, avg_entry_price = ?
+                        WHERE account_id = ? AND condition_id = ? AND token_id = ?
+                    """, (max(0, new_qty), current_avg, account_id, condition_id, token_id))
+                else:
+                    # Compounding SHORT position — recompute weighted avg
                     new_avg = ((current_qty * current_avg) - (filled_qty * avg_sell_price)) / new_qty
                     cursor.execute("""
                         UPDATE paper_positions SET qty = ?, avg_entry_price = ?
                         WHERE account_id = ? AND condition_id = ? AND token_id = ?
                     """, (new_qty, new_avg, account_id, condition_id, token_id))
-                else:
-                    # Position closed
-                    cursor.execute("""
-                        UPDATE paper_positions SET qty = 0, avg_entry_price = 0, status = 'CLOSED'
-                        WHERE account_id = ? AND condition_id = ? AND token_id = ?
-                    """, (account_id, condition_id, token_id))
             else:
                 # New short position
                 cursor.execute("""

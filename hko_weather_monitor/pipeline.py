@@ -235,10 +235,12 @@ async def run_signal_engine():
     """
     # Get all active condition_ids from market_outcomes
     conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT condition_id FROM market_outcomes")
-    active_conditions = [row[0] for row in cursor.fetchall()]
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT condition_id FROM market_outcomes")
+        active_conditions = [row[0] for row in cursor.fetchall()]
+    finally:
+        conn.close()
     
     if not active_conditions:
         logger.warning("No active markets in market_outcomes table")
@@ -292,14 +294,16 @@ async def run_signal_engine():
 
             # Get all outcomes for this condition
             conn = get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT yes_token_id, outcome_name, temp_min, temp_max
-                FROM market_outcomes 
-                WHERE condition_id = ?
-            """, (condition_id,))
-            outcomes = cursor.fetchall()
-            conn.close()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT yes_token_id, outcome_name, temp_min, temp_max
+                    FROM market_outcomes 
+                    WHERE condition_id = ?
+                """, (condition_id,))
+                outcomes = cursor.fetchall()
+            finally:
+                conn.close()
 
             # Phase 1: Score ALL outcomes (no trades yet)
             scored_buckets = []
@@ -382,10 +386,12 @@ async def run_signal_engine():
 
             # Portfolio exposure check
             conn = get_connection()
-            balance = conn.execute(
-                "SELECT cash_balance FROM accounts WHERE account_id = 'paper_user'"
-            ).fetchone()[0]
-            conn.close()
+            try:
+                balance = conn.execute(
+                    "SELECT cash_balance FROM accounts WHERE account_id = 'paper_user'"
+                ).fetchone()[0]
+            finally:
+                conn.close()
 
             # Kelly sizing for NO trade: f* = edge / (1 - market_yes)
             kelly_frac = edge / (1.0 - market_yes)
@@ -399,14 +405,16 @@ async def run_signal_engine():
 
             # Record in market_ticks
             tick_conn = get_connection()
-            tick_conn.execute("""
-                INSERT INTO market_ticks 
-                (condition_id, polymarket_yes_price, hko_predicted_value, 
-                 hko_forecast_horizon_days, model_calculated_prob, generated_signal)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (condition_id, market_yes, hko_max, horizon, best['model_prob'], "SELL"))
-            tick_conn.commit()
-            tick_conn.close()
+            try:
+                tick_conn.execute("""
+                    INSERT INTO market_ticks 
+                    (condition_id, polymarket_yes_price, hko_predicted_value, 
+                     hko_forecast_horizon_days, model_calculated_prob, generated_signal)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (condition_id, market_yes, hko_max, horizon, best['model_prob'], "SELL"))
+                tick_conn.commit()
+            finally:
+                tick_conn.close()
 
             # Execute: Sell YES (buy NO)
             fill = execution_engine.execute_paper_sell(
