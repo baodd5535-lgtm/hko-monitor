@@ -139,14 +139,13 @@ class WeatherTradingEngine:
         self.running = True
         import asyncio
 
-        # Write PID file for Dashboard tracking
+        # Write PID file for dashboard engine status tracking
         try:
-            with open('/tmp/hko_engine.pid', 'w') as pf:
-                pf.write(str(os.getpid()))
+            with open('/tmp/hko_engine.pid', 'w') as f:
+                f.write(str(os.getpid()))
             logger.info(f"Engine PID file written: {os.getpid()}")
         except Exception as e:
             logger.error(f"Failed to write PID file: {e}")
-        import os
 
         logger.info("=" * 60)
         logger.info("Starting hybrid weather trading engine...")
@@ -155,13 +154,6 @@ class WeatherTradingEngine:
         logger.info(f"  Heartbeat interval: {self.heartbeat_interval}s")
         logger.info(f"  Re-score cooldown: {self.rescore_cooldown}s")
         logger.info("=" * 60)
-
-        # Write PID file for dashboard engine status tracking
-        try:
-            with open('/tmp/hko_engine.pid', 'w') as f:
-                f.write(str(os.getpid()))
-        except Exception as e:
-            logger.error(f"Failed to write engine PID file: {e}")
 
         # Load active conditions — filter out resolved & expired
         from datetime import datetime, timezone, timedelta
