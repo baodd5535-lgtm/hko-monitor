@@ -334,7 +334,7 @@ HTML = """<!DOCTYPE html>
                 </div>
                 
                 <div id="trading-positions" style="margin-bottom:20px">
-                    <h4 style="color:#ccc;margin-bottom:12px">Open Positions</h4>
+                    <h4 style="color:#ccc;margin-bottom:12px">Current Positions</h4>
                     <table style="width:100%;border-collapse:collapse">
                         <thead>
                             <tr style="border-bottom:1px solid #333">
