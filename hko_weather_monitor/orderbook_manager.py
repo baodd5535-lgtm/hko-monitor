@@ -180,15 +180,22 @@ class PolymarketOrderbookManager:
         try:
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
+            # Upsert: update existing row or insert new one, keyed on token_id
             cursor.execute("""
-                INSERT OR REPLACE INTO orderbook_state 
-                (token_id, best_bid, best_ask, updated_at)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-            """, (token_id, best_bid, best_ask))
+                UPDATE orderbook_state 
+                SET best_bid = ?, best_ask = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE token_id = ?
+            """, (best_bid, best_ask, token_id))
+            if cursor.rowcount == 0:
+                cursor.execute("""
+                    INSERT INTO orderbook_state (token_id, best_bid, best_ask, updated_at)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                """, (token_id, best_bid, best_ask))
             conn.commit()
-            conn.close()
         except sqlite3.Error as e:
             logger.warning(f"Failed to persist orderbook: {e}")
+        finally:
+            conn.close()
 
     def inject_consumed_liquidity(self, token_id, side, price, size_consumed):
         """Deducts liquidity from the orderbook state immediately upon fill simulation."""
