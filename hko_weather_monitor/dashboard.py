@@ -1433,241 +1433,244 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         elif parsed.path == '/api/no_trading':
             # NO Trading Engine dashboard data
             conn = sqlite3.connect(DB_PATH)
-            conn.row_factory = sqlite3.Row
-
-            # 1. Trigger log (last 50)
-            triggers_out = []
             try:
-                triggers = conn.execute(
-                    "SELECT timestamp, type, message FROM trigger_log ORDER BY id DESC LIMIT 50"
-                ).fetchall()
-                for t in triggers:
-                    ts = t['timestamp']
-                    from datetime import datetime as _dt
-                    dt = _dt.fromtimestamp(ts).strftime('%H:%M:%S')
-                    triggers_out.append({
-                        'time': dt,
-                        'type': t['type'],
-                        'message': t['message'],
-                    })
-            except Exception:
-                # If no trigger_log table yet, seed from fills
-                pass
+                conn.row_factory = sqlite3.Row
 
-            if not triggers_out:
-                # Seed from recent SELL fills
+                # 1. Trigger log (last 50)
+                triggers_out = []
                 try:
-                    sells = conn.execute("""
-                        SELECT pf.timestamp, mo.outcome_name, pf.avg_fill_price,
-                               mo.condition_id
-                        FROM paper_fills pf
-                        JOIN market_outcomes mo ON pf.condition_id = mo.condition_id
-                        WHERE pf.order_side = 'SELL'
-                        ORDER BY pf.id DESC LIMIT 20
-                    """).fetchall()
-                    import time as _time
-                    for s in sells:
+                    triggers = conn.execute(
+                        "SELECT timestamp, type, message FROM trigger_log ORDER BY id DESC LIMIT 50"
+                    ).fetchall()
+                    for t in triggers:
+                        ts = t['timestamp']
+                        from datetime import datetime as _dt
+                        dt = _dt.fromtimestamp(ts).strftime('%H:%M:%S')
                         triggers_out.append({
-                            'time': s['timestamp'][-8:-3] if s['timestamp'] else '00:00:00',
-                            'type': 'trade_executed',
-                            'message': f"SELL YES (BUY NO): {s['outcome_name']} @ {s['avg_fill_price']:.4f}",
+                            'time': dt,
+                            'type': t['type'],
+                            'message': t['message'],
                         })
-                        # Insert into trigger_log for future
-                        try:
-                            conn.execute(
-                                "INSERT INTO trigger_log (timestamp, type, message) VALUES (?, ?, ?)",
-                                (_time.time(), 'trade_executed',
-                                 f"SELL YES (BUY NO): {s['outcome_name']} @ {s['avg_fill_price']:.4f}")
-                            )
-                        except Exception:
-                            pass
+                except Exception:
+                    # If no trigger_log table yet, seed from fills
+                    pass
+
+                if not triggers_out:
+                    # Seed from recent SELL fills
+                    try:
+                        sells = conn.execute("""
+                            SELECT pf.timestamp, mo.outcome_name, pf.avg_fill_price,
+                                   mo.condition_id
+                            FROM paper_fills pf
+                            JOIN market_outcomes mo ON pf.condition_id = mo.condition_id
+                            WHERE pf.order_side = 'SELL'
+                            ORDER BY pf.id DESC LIMIT 20
+                        """).fetchall()
+                        import time as _time
+                        for s in sells:
+                            triggers_out.append({
+                                'time': s['timestamp'][-8:-3] if s['timestamp'] else '00:00:00',
+                                'type': 'trade_executed',
+                                'message': f"SELL YES (BUY NO): {s['outcome_name']} @ {s['avg_fill_price']:.4f}",
+                            })
+                            # Insert into trigger_log for future
+                            try:
+                                conn.execute(
+                                    "INSERT INTO trigger_log (timestamp, type, message) VALUES (?, ?, ?)",
+                                    (_time.time(), 'trade_executed',
+                                     f"SELL YES (BUY NO): {s['outcome_name']} @ {s['avg_fill_price']:.4f}")
+                                )
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                # 2. NO positions (side='NO')
+                no_positions = []
+                try:
+                    rows = conn.execute("""
+                        SELECT pp.condition_id, pp.token_id, pp.qty,
+                               pp.avg_entry_price, pp.opened_at, pp.status,
+                               mo.outcome_name, m.target_date, m.title
+                        FROM paper_positions pp
+                        JOIN market_outcomes mo ON pp.token_id = mo.yes_token_id
+                        LEFT JOIN markets m ON pp.condition_id = m.condition_id
+                        WHERE pp.side = 'NO'
+                        ORDER BY pp.id DESC LIMIT 50
+                    """).fetchall()
+
+                    # Get current prices from orderbook_state
+                    token_ids = [r['token_id'] for r in rows if r['token_id']]
+                    current_prices = {}
+                    if token_ids:
+                        placeholders = ','.join(['?' for _ in token_ids])
+                        book_rows = conn.execute(f"""
+                            SELECT token_id, best_bid, best_ask
+                            FROM orderbook_state
+                            WHERE token_id IN ({placeholders})
+                              AND (best_bid IS NOT NULL OR best_ask IS NOT NULL)
+                        """, token_ids).fetchall()
+                        for br in book_rows:
+                            bid = br[1]
+                            ask = br[2]
+                            if bid is not None or ask is not None:
+                                mid = ((bid or 0) + (ask or 0)) / 2.0
+                                current_prices[br[0]] = mid
+
+                    for row in rows:
+                        cp = current_prices.get(row['token_id'])
+                        entry = row['avg_entry_price'] or 0
+                        # For SHORT: profit if price goes DOWN
+                        qty = abs(row['qty'] or 0)
+                        pnl = (entry - (cp if cp else entry)) * qty
+                        no_positions.append({
+                            'market': (row['target_date'] or row['condition_id']).split('T')[0],
+                            'bucket': row['outcome_name'] or 'N/A',
+                            'qty': qty,
+                            'entry_price': entry,
+                            'current_price': cp,
+                            'pnl': pnl,
+                            'status': row['status'] if row['status'] else 'OPEN',
+                            'trigger': row['opened_at'][-8:-3] if row['opened_at'] else '',
+                        })
+                except Exception as e:
+                    pass
+
+                # 3. Multi-factor adjustments per date
+                factors_out = []
+                try:
+                    # Get active condition IDs
+                    conditions = conn.execute(
+                        "SELECT DISTINCT condition_id FROM market_outcomes"
+                    ).fetchall()
+                    for (cond,) in conditions:
+                        import re as _re
+                        m = _re.search(r'(\d{4}-\d{2}-\d{2})', cond)
+                        if not m:
+                            continue
+                        date_iso = m.group(1)
+                        date_hko = date_iso.replace('-', '')
+
+                        # Get daily forecast from forecast_daily table
+                        daily = conn.execute("""
+                            SELECT max_temperature, min_temperature, weather_code,
+                                   chance_of_rain
+                            FROM forecast_daily
+                            WHERE station_code = 'HKO'
+                              AND forecast_date = ?
+                            ORDER BY fetched_at DESC LIMIT 1
+                        """, (date_hko,)).fetchone()
+
+                        if not daily or daily['max_temperature'] is None:
+                            continue
+
+                        raw_temp = float(daily['max_temperature'])
+
+                        # Weather code → cloud coverage
+                        wc = daily['weather_code'] or 0
+                        cloud_map = {
+                            0: 0.0, 1: 15.0, 2: 65.0, 3: 85.0,
+                            50: 30.0, 51: 10.0, 52: 30.0, 53: 10.0, 54: 25.0,
+                            60: 75.0, 61: 65.0, 62: 90.0, 63: 95.0, 64: 90.0,
+                            71: 95.0, 72: 100.0, 73: 100.0, 74: 100.0, 76: 100.0,
+                        }
+                        cloud_cov = cloud_map.get(wc, 50.0)
+
+                        # Cloud adjustment
+                        cloud_adj = 0.0
+                        if cloud_cov > 75.0:
+                            cloud_adj = -0.8
+                        elif cloud_cov < 20.0:
+                            cloud_adj = 0.4
+
+                        # Get hourly wind/humidity from forecast_hourly
+                        hourly = conn.execute("""
+                            SELECT humidity, wind_speed, wind_direction
+                            FROM forecast_hourly
+                            WHERE station_code = 'HKO'
+                              AND forecast_hour LIKE ?
+                            ORDER BY forecast_hour ASC
+                            LIMIT 12
+                        """, (date_hko + '%',)).fetchall()
+
+                        humidity_avg = 0.0
+                        wind_speed_avg = 0.0
+                        wind_dirs = []
+                        for h in hourly:
+                            if h[0] is not None:
+                                humidity_avg += h[0]
+                            if h[1] is not None:
+                                wind_speed_avg += h[1]
+                            if h[2] is not None:
+                                # Convert numeric direction to cardinal
+                                deg = int(h[2])
+                                dirs = ['N','NNE','NE','ENE','E','ESE','SE','SSE',
+                                        'S','SSW','SW','WSW','W','WNW','NW','NNW']
+                                wind_dirs.append(dirs[round(deg / 22.5) % 16])
+
+                        wind_speed_kmh = 0.0
+                        if hourly:
+                            humidity_avg /= len(hourly)
+                            wind_speed_avg /= len(hourly)
+                            # Convert m/s to km/h for threshold comparison
+                            wind_speed_kmh = wind_speed_avg * 3.6
+
+                        # Humidity adjustment
+                        humidity_adj = 0.0
+                        if humidity_avg > 85.0:
+                            humidity_adj = -0.3
+
+                        # Wind adjustment
+                        wind_adj = 0.0
+                        dominant_dir = max(set(wind_dirs), key=wind_dirs.count) if wind_dirs else 'E'
+                        if dominant_dir in ['E', 'SE'] and wind_speed_kmh > 15.0:
+                            wind_adj = -0.5
+                        elif dominant_dir in ['N', 'NW'] and wind_speed_kmh < 10.0:
+                            wind_adj = 0.6
+
+                        # UV adjustment
+                        import hko_weather_monitor.uv_fetcher as _uv
+                        uv_peak = _uv.get_peak_uv_index(date_hko)
+                        uv_adj = _uv.get_uv_forecast_adjustment(uv_peak)
+                        # None safety: ensure all adjustments are numeric before math
+                        uv_adj = uv_adj if uv_adj is not None else 0.0
+                        cloud_adj = cloud_adj if cloud_adj is not None else 0.0
+                        wind_adj = wind_adj if wind_adj is not None else 0.0
+                        humidity_adj = humidity_adj if humidity_adj is not None else 0.0
+                        if uv_peak is not None and uv_peak <= 2:
+                            uv_level = 'low'
+                        elif uv_peak is not None and uv_peak <= 5:
+                            uv_level = 'moderate'
+                        elif uv_peak is not None and uv_peak <= 7:
+                            uv_level = 'high'
+                        elif uv_peak is not None and uv_peak <= 10:
+                            uv_level = 'very_high'
+                        elif uv_peak is not None:
+                            uv_level = 'extreme'
+                        else:
+                            uv_level = 'N/A'
+
+                        adjusted_temp = raw_temp + cloud_adj + wind_adj + humidity_adj + uv_adj
+
+                        factors_out.append({
+                            'date': date_iso,
+                            'raw_temp': raw_temp,
+                            'cloud_adj': cloud_adj,
+                            'wind_adj': wind_adj,
+                            'humidity_adj': humidity_adj,
+                            'uv_adj': uv_adj,
+                            'peak_uv': uv_peak,
+                            'uv_level': uv_level,
+                            'adjusted_temp': adjusted_temp,
+                            'details': f'Cloud:{cloud_cov:.0f}% Wind:{dominant_dir} {wind_speed_avg:.1f}m/s RH:{humidity_avg:.0f}% Rain:{daily["chance_of_rain"] or 0}% UV:{uv_peak} ({uv_level})',
+                        })
                 except Exception:
                     pass
 
-            # 2. NO positions (side='NO')
-            no_positions = []
-            try:
-                rows = conn.execute("""
-                    SELECT pp.condition_id, pp.token_id, pp.qty,
-                           pp.avg_entry_price, pp.opened_at, pp.status,
-                           mo.outcome_name, m.target_date, m.title
-                    FROM paper_positions pp
-                    JOIN market_outcomes mo ON pp.token_id = mo.yes_token_id
-                    LEFT JOIN markets m ON pp.condition_id = m.condition_id
-                    WHERE pp.side = 'NO'
-                    ORDER BY pp.id DESC LIMIT 50
-                """).fetchall()
+                conn.commit()
 
-                # Get current prices from orderbook_state
-                token_ids = [r['token_id'] for r in rows if r['token_id']]
-                current_prices = {}
-                if token_ids:
-                    placeholders = ','.join(['?' for _ in token_ids])
-                    book_rows = conn.execute(f"""
-                        SELECT token_id, best_bid, best_ask
-                        FROM orderbook_state
-                        WHERE token_id IN ({placeholders})
-                          AND (best_bid IS NOT NULL OR best_ask IS NOT NULL)
-                    """, token_ids).fetchall()
-                    for br in book_rows:
-                        bid = br[1]
-                        ask = br[2]
-                        if bid is not None or ask is not None:
-                            mid = ((bid or 0) + (ask or 0)) / 2.0
-                            current_prices[br[0]] = mid
-
-                for row in rows:
-                    cp = current_prices.get(row['token_id'])
-                    entry = row['avg_entry_price'] or 0
-                    # For SHORT: profit if price goes DOWN
-                    qty = abs(row['qty'] or 0)
-                    pnl = (entry - (cp if cp else entry)) * qty
-                    no_positions.append({
-                        'market': (row['target_date'] or row['condition_id']).split('T')[0],
-                        'bucket': row['outcome_name'] or 'N/A',
-                        'qty': qty,
-                        'entry_price': entry,
-                        'current_price': cp,
-                        'pnl': pnl,
-                        'status': row['status'] if row['status'] else 'OPEN',
-                        'trigger': row['opened_at'][-8:-3] if row['opened_at'] else '',
-                    })
-            except Exception as e:
-                pass
-
-            # 3. Multi-factor adjustments per date
-            factors_out = []
-            try:
-                # Get active condition IDs
-                conditions = conn.execute(
-                    "SELECT DISTINCT condition_id FROM market_outcomes"
-                ).fetchall()
-                for (cond,) in conditions:
-                    import re as _re
-                    m = _re.search(r'(\d{4}-\d{2}-\d{2})', cond)
-                    if not m:
-                        continue
-                    date_iso = m.group(1)
-                    date_hko = date_iso.replace('-', '')
-
-                    # Get daily forecast from forecast_daily table
-                    daily = conn.execute("""
-                        SELECT max_temperature, min_temperature, weather_code,
-                               chance_of_rain
-                        FROM forecast_daily
-                        WHERE station_code = 'HKO'
-                          AND forecast_date = ?
-                        ORDER BY fetched_at DESC LIMIT 1
-                    """, (date_hko,)).fetchone()
-
-                    if not daily or daily['max_temperature'] is None:
-                        continue
-
-                    raw_temp = float(daily['max_temperature'])
-
-                    # Weather code → cloud coverage
-                    wc = daily['weather_code'] or 0
-                    cloud_map = {
-                        0: 0.0, 1: 15.0, 2: 65.0, 3: 85.0,
-                        50: 30.0, 51: 10.0, 52: 30.0, 53: 10.0, 54: 25.0,
-                        60: 75.0, 61: 65.0, 62: 90.0, 63: 95.0, 64: 90.0,
-                        71: 95.0, 72: 100.0, 73: 100.0, 74: 100.0, 76: 100.0,
-                    }
-                    cloud_cov = cloud_map.get(wc, 50.0)
-
-                    # Cloud adjustment
-                    cloud_adj = 0.0
-                    if cloud_cov > 75.0:
-                        cloud_adj = -0.8
-                    elif cloud_cov < 20.0:
-                        cloud_adj = 0.4
-
-                    # Get hourly wind/humidity from forecast_hourly
-                    hourly = conn.execute("""
-                        SELECT humidity, wind_speed, wind_direction
-                        FROM forecast_hourly
-                        WHERE station_code = 'HKO'
-                          AND forecast_hour LIKE ?
-                        ORDER BY forecast_hour ASC
-                        LIMIT 12
-                    """, (date_hko + '%',)).fetchall()
-
-                    humidity_avg = 0.0
-                    wind_speed_avg = 0.0
-                    wind_dirs = []
-                    for h in hourly:
-                        if h[0] is not None:
-                            humidity_avg += h[0]
-                        if h[1] is not None:
-                            wind_speed_avg += h[1]
-                        if h[2] is not None:
-                            # Convert numeric direction to cardinal
-                            deg = int(h[2])
-                            dirs = ['N','NNE','NE','ENE','E','ESE','SE','SSE',
-                                    'S','SSW','SW','WSW','W','WNW','NW','NNW']
-                            wind_dirs.append(dirs[round(deg / 22.5) % 16])
-
-                    wind_speed_kmh = 0.0
-                    if hourly:
-                        humidity_avg /= len(hourly)
-                        wind_speed_avg /= len(hourly)
-                        # Convert m/s to km/h for threshold comparison
-                        wind_speed_kmh = wind_speed_avg * 3.6
-
-                    # Humidity adjustment
-                    humidity_adj = 0.0
-                    if humidity_avg > 85.0:
-                        humidity_adj = -0.3
-
-                    # Wind adjustment
-                    wind_adj = 0.0
-                    dominant_dir = max(set(wind_dirs), key=wind_dirs.count) if wind_dirs else 'E'
-                    if dominant_dir in ['E', 'SE'] and wind_speed_kmh > 15.0:
-                        wind_adj = -0.5
-                    elif dominant_dir in ['N', 'NW'] and wind_speed_kmh < 10.0:
-                        wind_adj = 0.6
-
-                    # UV adjustment
-                    import hko_weather_monitor.uv_fetcher as _uv
-                    uv_peak = _uv.get_peak_uv_index(date_hko)
-                    uv_adj = _uv.get_uv_forecast_adjustment(uv_peak)
-                    # None safety: ensure all adjustments are numeric before math
-                    uv_adj = uv_adj if uv_adj is not None else 0.0
-                    cloud_adj = cloud_adj if cloud_adj is not None else 0.0
-                    wind_adj = wind_adj if wind_adj is not None else 0.0
-                    humidity_adj = humidity_adj if humidity_adj is not None else 0.0
-                    if uv_peak is not None and uv_peak <= 2:
-                        uv_level = 'low'
-                    elif uv_peak is not None and uv_peak <= 5:
-                        uv_level = 'moderate'
-                    elif uv_peak is not None and uv_peak <= 7:
-                        uv_level = 'high'
-                    elif uv_peak is not None and uv_peak <= 10:
-                        uv_level = 'very_high'
-                    elif uv_peak is not None:
-                        uv_level = 'extreme'
-                    else:
-                        uv_level = 'N/A'
-
-                    adjusted_temp = raw_temp + cloud_adj + wind_adj + humidity_adj + uv_adj
-
-                    factors_out.append({
-                        'date': date_iso,
-                        'raw_temp': raw_temp,
-                        'cloud_adj': cloud_adj,
-                        'wind_adj': wind_adj,
-                        'humidity_adj': humidity_adj,
-                        'uv_adj': uv_adj,
-                        'peak_uv': uv_peak,
-                        'uv_level': uv_level,
-                        'adjusted_temp': adjusted_temp,
-                        'details': f'Cloud:{cloud_cov:.0f}% Wind:{dominant_dir} {wind_speed_avg:.1f}m/s RH:{humidity_avg:.0f}% Rain:{daily["chance_of_rain"] or 0}% UV:{uv_peak} ({uv_level})',
-                    })
-            except Exception:
-                pass
-
-            conn.commit()
-            conn.close()
+            finally:
+                conn.close()
 
             # 4. Engine status (PID file check + timestamps from DB)
             import os as _os
@@ -1687,27 +1690,35 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             last_heartbeat = 0.0
             last_rescore = 0.0
             try:
-                conn = sqlite3.connect(DB_PATH)
-                for row in conn.execute('SELECT key, value FROM engine_status').fetchall():
-                    if row[0] == 'last_hko_sync':
-                        last_hko_sync = row[1]
-                    elif row[0] == 'last_heartbeat':
-                        last_heartbeat = row[1]
-                    elif row[0] == 'last_rescore':
-                        last_rescore = row[1]
-                conn.close()
+                conn2 = sqlite3.connect(DB_PATH)
+                try:
+                    for row in conn2.execute('SELECT key, value FROM engine_status').fetchall():
+                        if row[0] == 'last_hko_sync':
+                            last_hko_sync = row[1]
+                        elif row[0] == 'last_heartbeat':
+                            last_heartbeat = row[1]
+                        elif row[0] == 'last_rescore':
+                            last_rescore = row[1]
+                finally:
+                    conn2.close()
             except Exception:
                 pass
 
             # Counts from DB
-            conn = sqlite3.connect(DB_PATH)
-            tracked_tokens = conn.execute(
-                "SELECT COUNT(DISTINCT token_id) FROM orderbook_state"
-            ).fetchone()[0]
-            tracked_dates = conn.execute(
-                "SELECT COUNT(DISTINCT condition_id) FROM market_outcomes"
-            ).fetchone()[0]
-            conn.close()
+            try:
+                conn3 = sqlite3.connect(DB_PATH)
+                try:
+                    tracked_tokens = conn3.execute(
+                        "SELECT COUNT(DISTINCT token_id) FROM orderbook_state"
+                    ).fetchone()[0]
+                    tracked_dates = conn3.execute(
+                        "SELECT COUNT(DISTINCT condition_id) FROM market_outcomes"
+                    ).fetchone()[0]
+                finally:
+                    conn3.close()
+            except Exception:
+                tracked_tokens = 0
+                tracked_dates = 0
 
             self._json_response({
                 'engine_running': engine_running,

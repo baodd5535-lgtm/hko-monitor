@@ -292,10 +292,40 @@ class WeatherTradingEngine:
                 if now - self.last_rescore < self.rescore_cooldown:
                     return
                 self._momentum_last_trigger[token_id] = now
-                self.last_rescore = now
+                # NOTE: Do NOT set self.last_rescore here — _trigger_rescore handles it
+                # Setting it here would cause the cooldown check inside _trigger_rescore to always skip
                 logger.info(f"[MOMENTUM] {token_id[:20]}...: price delta = {momentum:.4f}")
                 log_trigger('momentum', f"Token {token_id[:20]}... delta={momentum:.4f}")
                 asyncio.ensure_future(self._trigger_rescore(f"momentum:{token_id[:20]}"))
+
+    async def _seed_new_markets_if_needed(self):
+        """Periodically check for new Polymarket HK temperature markets."""
+        conn = get_connection()
+        try:
+            active_count = conn.execute(
+                "SELECT COUNT(*) FROM markets WHERE status = 'ACTIVE'"
+            ).fetchone()[0]
+            if active_count == 0:
+                logger.info("No active markets — seeding new markets from Polymarket...")
+                from hko_weather_monitor.seed_markets import seed_markets
+                seed_markets()
+                # Reload active conditions
+                self.active_conditions.clear()
+                conn2 = get_connection()
+                try:
+                    all_conditions = conn2.execute(
+                        "SELECT condition_id, status FROM markets"
+                    ).fetchall()
+                    for (condition_id, market_status) in all_conditions:
+                        if market_status != 'RESOLVED':
+                            self.active_conditions.append(condition_id)
+                finally:
+                    conn2.close()
+                logger.info(f"Seeded markets. Active conditions: {len(self.active_conditions)}")
+        except Exception as e:
+            logger.warning(f"Market seeding failed: {e}")
+        finally:
+            conn.close()
 
     # ─── HKO Forecast Sync ──────────────────────────────────────
 
@@ -417,6 +447,7 @@ class WeatherTradingEngine:
                     )
 
         self.last_hko_sync = time.time()
+        self._update_engine_timestamp()
 
         if hko_changed:
             logger.info("[HKO] Forecast data changed — triggering re-score")
@@ -537,6 +568,7 @@ class WeatherTradingEngine:
 
         logger.info(f"[RESCORE] Triggered by: {reason}")
         self.last_rescore = now
+        self._update_engine_timestamp()
         await self.evaluate_and_execute_trades()
 
     # ─── Scoring Engine (reuses pipeline.py logic) ──────────────
@@ -789,13 +821,18 @@ class WeatherTradingEngine:
                 traceback.print_exc()
 
     def _update_engine_timestamp(self):
-        """Update engine timestamp in DB for dashboard."""
+        """Update engine timestamps in DB for dashboard (heartbeat, hko_sync, rescore)."""
         conn = get_connection()
         try:
-            conn.execute(
-                "INSERT OR REPLACE INTO engine_status (key, value) VALUES ('last_heartbeat', ?)",
-                (str(time.time()),)
-            )
+            for key, val in [
+                ('last_heartbeat', self.last_heartbeat),
+                ('last_hko_sync', self.last_hko_sync),
+                ('last_rescore', self.last_rescore),
+            ]:
+                conn.execute(
+                    "INSERT OR REPLACE INTO engine_status (key, value) VALUES (?, ?)",
+                    (key, float(val))
+                )
             conn.commit()
         except Exception:
             pass
