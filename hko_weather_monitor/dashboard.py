@@ -1799,10 +1799,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 tracked_tokens = 0
                 tracked_dates = 0
 
-            # Scoring log (latest per bucket)
+            # Scoring log (latest per bucket) — independent connection (conn was closed earlier)
             scoring_out = []
             try:
-                for row in conn.execute("""
+                scoring_conn = sqlite3.connect(DB_PATH)
+                for row in scoring_conn.execute("""
                     SELECT timestamp, condition_id, bucket, hko_forecast,
                            model_prob, market_yes, edge, no_score, conviction,
                            kelly_frac, position_size, decision, rationale
@@ -1813,19 +1814,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     ORDER BY condition_id, bucket
                 """).fetchall():
                     scoring_out.append({
-                        'ts': row[0], 'condition': row[1][:25], 'bucket': row[2],
+                        'ts': row[0], 'condition': row[1][:25] if row[1] else 'N/A', 'bucket': row[2],
                         'hko': row[3], 'model_prob': row[4], 'market_yes': row[5],
                         'edge': row[6], 'no_score': row[7], 'conviction': row[8],
                         'kelly': row[9], 'pos_size': row[10], 'decision': row[11],
                         'rationale': row[12],
                     })
+                scoring_conn.close()
             except Exception:
-                pass
+                import traceback
+                traceback.print_exc()
 
-            # Maker orders (latest per bucket)
+            # Maker orders (latest per bucket) — independent connection (conn was closed earlier)
             maker_out = []
             try:
-                for row in conn.execute("""
+                maker_conn = sqlite3.connect(DB_PATH)
+                for row in maker_conn.execute("""
                     SELECT timestamp, condition_id, bucket, side, price, size,
                            fair_value, spread_offset, rationale, status
                     FROM maker_orders
@@ -1835,13 +1839,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     ORDER BY condition_id, bucket, side
                 """).fetchall():
                     maker_out.append({
-                        'ts': row[0], 'condition': row[1][:25], 'bucket': row[2],
+                        'ts': row[0], 'condition': row[1][:25] if row[1] else 'N/A', 'bucket': row[2],
                         'side': row[3], 'price': row[4], 'size': row[5],
                         'fair_value': row[6], 'spread': row[7],
                         'rationale': row[8], 'status': row[9],
                     })
+                maker_conn.close()
             except Exception:
-                pass
+                import traceback
+                traceback.print_exc()
 
             self._json_response({
                 'engine_running': engine_running,
