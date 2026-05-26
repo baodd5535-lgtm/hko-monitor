@@ -674,8 +674,26 @@ class WeatherTradingEngine:
 
                     bids, asks = self.book_manager.get_snapshot(token_id)
                     if not bids or not asks:
-                        all_market_prices.append(0.0)  # No liquidity
-                        continue
+                        # Fallback: query orderbook_state DB for latest prices
+                        fb = conn_fb.execute("""
+                            SELECT best_bid, best_ask
+                            FROM orderbook_state
+                            WHERE token_id = ? AND best_bid IS NOT NULL
+                            ORDER BY id DESC LIMIT 1
+                        """, (token_id,)).fetchone()
+                        if fb and fb[1]:
+                            bids, asks = [((fb[0], 100),)], [((fb[1], 100),)]
+                        else:
+                            all_market_prices.append(0.0)
+                            scored_buckets.append({
+                                'token_id': token_id,
+                                'outcome_name': outcome_name,
+                                'model_prob': model_prob,
+                                'market_yes': None,
+                                'no_score': 0,
+                                'momentum': 0,
+                            })
+                            continue
 
                     best_bid = bids[0][0]
                     best_ask = asks[0][0]
@@ -714,15 +732,83 @@ class WeatherTradingEngine:
                 from hko_weather_monitor.pipeline import bayesian_blend_probs
                 blended_probs = bayesian_blend_probs(all_probs, all_market_prices, horizon)
 
+                # Update model_prob with blended
+                for idx, bkt in enumerate(scored_buckets):
+                    if idx < len(blended_probs):
+                        bkt['model_prob'] = blended_probs[idx]
+
                 # Sort by adjusted NO score
                 scored_buckets.sort(key=lambda x: x['no_score'], reverse=True)
 
                 # Conviction check on blended distribution
                 conviction = calculate_conviction(blended_probs) if blended_probs else 0.0
+
+                # ─── Log ALL scoring decisions + maker orders ───
+                bal = 0
+                conn_s = get_connection()
+                try:
+                    bal = conn_s.execute("SELECT cash_balance FROM accounts WHERE account_id='paper_user'").fetchone()[0]
+
+                    for bkt in scored_buckets:
+                        edge_val = (bkt.get('market_yes', 0) or 0) - bkt['model_prob']
+                        no_sc = bkt.get('no_score', 0)
+                        kf = max(0, 0.25 * edge_val / (1.0 - (bkt.get('market_yes', 0) or 0))) if edge_val > 0 else 0
+
+                        if bkt['market_yes'] is None:
+                            decision, rationale = 'SKIP', 'No orderbook data'
+                        elif conviction < CONVICTION_MIN:
+                            decision, rationale = 'SKIP', f'Conviction {conviction:.3f} < {CONVICTION_MIN}'
+                        elif existing > 0:
+                            decision, rationale = 'SKIP', f'Already have {existing} NO position(s)'
+                        elif no_sc > 0 and edge_val >= threshold and kf * bal > 10:
+                            decision, rationale = 'TRADE_CANDIDATE', f'Edge={edge_val:.4f} NO={no_sc:.4f} Kelly={kf:.4f}'
+                        elif no_sc <= 0:
+                            decision, rationale = 'SKIP', 'Market overpriced YES — no edge'
+                        elif edge_val < threshold:
+                            decision, rationale = 'SKIP', f'Edge {edge_val:.4f} < threshold {threshold:.4f}'
+                        else:
+                            decision, rationale = 'SKIP', 'Position too small'
+
+                        conn_s.execute("""
+                            INSERT INTO scoring_log (timestamp, condition_id, bucket, hko_forecast,
+                                model_prob, market_yes, edge, no_score, conviction, kelly_frac,
+                                position_size, decision, rationale)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """, (time.time(), condition_id, bkt['outcome_name'], adjusted_temp,
+                              bkt['model_prob'], bkt.get('market_yes'), edge_val, no_sc,
+                              conviction, kf, kf*bal, decision, rationale))
+
+                    # Maker orders: post improving-limit orders on high-prob buckets
+                    from hko_weather_monitor.pipeline import MAKER_SPREAD, MAKER_MAX_POSITION, MAKER_MIN_PROB
+                    for bkt in scored_buckets:
+                        if bkt['market_yes'] is None or bkt['model_prob'] < MAKER_MIN_PROB:
+                            continue
+                        fv = bkt['model_prob']
+                        mk_bid, mk_ask = fv - MAKER_SPREAD, fv + MAKER_SPREAD
+                        bids, asks = self.book_manager.get_snapshot(bkt['token_id'])
+                        bb = bids[0][0] if bids else 0
+                        ba = asks[0][0] if asks else 1
+                        if mk_bid >= bb:
+                            conn_s.execute("""
+                                INSERT INTO maker_orders (timestamp,condition_id,bucket,side,price,size,fair_value,spread_offset,rationale)
+                                VALUES (?,?,?,?,?,?,?,?,?)
+                            """, (time.time(), condition_id, bkt['outcome_name'], 'BUY_YES',
+                                  mk_bid, MAKER_MAX_POSITION, fv, MAKER_SPREAD,
+                                  f'Model={fv:.3f} bid@{mk_bid:.3f} vs mkt@{bb:.3f}'))
+                        if mk_ask <= ba:
+                            conn_s.execute("""
+                                INSERT INTO maker_orders (timestamp,condition_id,bucket,side,price,size,fair_value,spread_offset,rationale)
+                                VALUES (?,?,?,?,?,?,?,?,?)
+                            """, (time.time(), condition_id, bkt['outcome_name'], 'SELL_YES',
+                                  mk_ask, MAKER_MAX_POSITION, fv, MAKER_SPREAD,
+                                  f'Model={fv:.3f} ask@{mk_ask:.3f} vs mkt@{ba:.3f}'))
+
+                    conn_s.commit()
+                finally:
+                    conn_s.close()
+
                 if conviction < CONVICTION_MIN:
-                    logger.info(
-                        f"[{condition_id}] Conviction {conviction:.3f} < {CONVICTION_MIN}"
-                    )
+                    logger.info(f"[{condition_id}] Conviction {conviction:.3f} < {CONVICTION_MIN}")
                     continue
 
                 # Best candidate
