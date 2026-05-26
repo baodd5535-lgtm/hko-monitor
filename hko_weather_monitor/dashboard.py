@@ -1225,7 +1225,7 @@ HTML = """<!DOCTYPE html>
                     const decColor = s.decision === 'TRADE_CANDIDATE' ? '#4caf50' :
                                      s.decision === 'SKIP' ? '#888' : '#ff9800';
                     return `<tr style="border-bottom:1px solid #1a1a2e">
-                        <td style="padding:8px;color:#888;font-size:11px">${s.condition_id || ''}</td>
+                        <td style="padding:8px;color:#888;font-size:11px">${s.condition || ''}</td>
                         <td style="padding:8px;color:#ccc">${s.bucket || ''}</td>
                         <td style="padding:8px;text-align:right;color:#00d4ff">${s.model_prob != null ? s.model_prob.toFixed(3) : '-'}</td>
                         <td style="padding:8px;text-align:right;color:#ccc">${s.market_yes != null ? s.market_yes.toFixed(3) : '-'}</td>
@@ -1245,7 +1245,7 @@ HTML = """<!DOCTYPE html>
                     const sideColor = m.side === 'BUY_YES' ? '#4caf50' : '#f44336';
                     const statusColor = m.status === 'OPEN' ? '#4caf50' : '#888';
                     return `<tr style="border-bottom:1px solid #1a1a2e">
-                        <td style="padding:8px;color:#888;font-size:11px">${m.condition_id || ''}</td>
+                        <td style="padding:8px;color:#888;font-size:11px">${m.condition || ''}</td>
                         <td style="padding:8px;color:#ccc">${m.bucket || ''}</td>
                         <td style="padding:8px;text-align:left;color:${sideColor};font-weight:bold;font-size:11px">${m.side || '-'}</td>
                         <td style="padding:8px;text-align:right;color:#fff">${m.price != null ? m.price.toFixed(3) : '-'}</td>
