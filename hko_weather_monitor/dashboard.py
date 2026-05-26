@@ -1721,6 +1721,50 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 tracked_tokens = 0
                 tracked_dates = 0
 
+            # Scoring log (latest per bucket)
+            scoring_out = []
+            try:
+                for row in conn.execute("""
+                    SELECT timestamp, condition_id, bucket, hko_forecast,
+                           model_prob, market_yes, edge, no_score, conviction,
+                           kelly_frac, position_size, decision, rationale
+                    FROM scoring_log
+                    WHERE timestamp = (SELECT MAX(timestamp) FROM scoring_log sl2
+                                       WHERE sl2.condition_id = scoring_log.condition_id
+                                         AND sl2.bucket = scoring_log.bucket)
+                    ORDER BY condition_id, bucket
+                """).fetchall():
+                    scoring_out.append({
+                        'ts': row[0], 'condition': row[1][:25], 'bucket': row[2],
+                        'hko': row[3], 'model_prob': row[4], 'market_yes': row[5],
+                        'edge': row[6], 'no_score': row[7], 'conviction': row[8],
+                        'kelly': row[9], 'pos_size': row[10], 'decision': row[11],
+                        'rationale': row[12],
+                    })
+            except Exception:
+                pass
+
+            # Maker orders (latest per bucket)
+            maker_out = []
+            try:
+                for row in conn.execute("""
+                    SELECT timestamp, condition_id, bucket, side, price, size,
+                           fair_value, spread_offset, rationale, status
+                    FROM maker_orders
+                    WHERE timestamp = (SELECT MAX(timestamp) FROM maker_orders mo2
+                                       WHERE mo2.condition_id = maker_orders.condition_id
+                                         AND mo2.bucket = maker_orders.bucket)
+                    ORDER BY condition_id, bucket, side
+                """).fetchall():
+                    maker_out.append({
+                        'ts': row[0], 'condition': row[1][:25], 'bucket': row[2],
+                        'side': row[3], 'price': row[4], 'size': row[5],
+                        'fair_value': row[6], 'spread': row[7],
+                        'rationale': row[8], 'status': row[9],
+                    })
+            except Exception:
+                pass
+
             self._json_response({
                 'engine_running': engine_running,
                 'active_conditions': tracked_dates,
@@ -1732,6 +1776,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 'triggers': triggers_out,
                 'factors': factors_out,
                 'no_positions': no_positions,
+                'scoring': scoring_out,
+                'maker_orders': maker_out,
             })
 
         else:

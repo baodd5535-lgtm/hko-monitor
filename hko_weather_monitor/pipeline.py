@@ -6,6 +6,7 @@ import asyncio
 import json
 import sqlite3
 import math
+import time
 import logging
 import re
 from datetime import datetime, date
@@ -25,6 +26,11 @@ from hko_weather_monitor.station_correlations import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Maker params
+MAKER_SPREAD = 0.02          # 2-cent offset from fair value
+MAKER_MAX_POSITION = 500     # Max $500 per maker bucket
+MAKER_MIN_PROB = 0.05        # Skip buckets with <5% model probability
 
 # Cache historical errors globally
 _error_df = None
@@ -360,9 +366,95 @@ async def run_signal_engine():
             conviction = calculate_conviction(all_probs) if all_probs else 0.0
             logger.info(f"[{condition_id}] Conviction: {conviction:.3f} (min: {CONVICTION_MIN})")
 
+            # Get balance early (needed for scoring decisions)
+            balance_conn = get_connection()
+            try:
+                balance = balance_conn.execute(
+                    "SELECT cash_balance FROM accounts WHERE account_id = 'paper_user'"
+                ).fetchone()[0]
+            finally:
+                balance_conn.close()
+
+            # ─── PHASE 3: Log ALL scoring decisions to DB ───
+            scoring_conn = get_connection()
+            try:
+                for bucket in scored_buckets:
+                    edge_val = (bucket.get('market_yes', 0) or 0) - bucket['model_prob']
+                    no_sc = bucket.get('no_score', 0)
+                    kf = max(0, 0.25 * edge_val / (1.0 - (bucket.get('market_yes', 0) or 0))) if edge_val > 0 else 0
+
+                    # Determine decision & rationale
+                    if bucket['market_yes'] is None:
+                        decision = 'SKIP'
+                        rationale = 'No orderbook data'
+                    elif conviction < CONVICTION_MIN:
+                        decision = 'SKIP'
+                        rationale = f'Conviction {conviction:.3f} < {CONVICTION_MIN}'
+                    elif no_sc > 0 and edge_val >= threshold and kf * balance > 10:
+                        decision = 'TRADE_CANDIDATE'
+                        rationale = f'Edge={edge_val:.4f}, NO_score={no_sc:.6f}, Kelly={kf:.4f}'
+                    elif no_sc <= 0:
+                        decision = 'SKIP'
+                        rationale = f'Market overpriced YES (model>{market}: no edge)'
+                    elif edge_val < threshold:
+                        decision = 'SKIP'
+                        rationale = f'Edge {edge_val:.4f} < threshold {threshold:.4f}'
+                    else:
+                        decision = 'SKIP'
+                        rationale = f'Position size too small'
+
+                    scoring_conn.execute("""
+                        INSERT INTO scoring_log (timestamp, condition_id, bucket, hko_forecast,
+                            model_prob, market_yes, edge, no_score, conviction, kelly_frac,
+                            position_size, decision, rationale)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (time.time(), condition_id, bucket['outcome_name'],
+                          hko_max, bucket['model_prob'], bucket.get('market_yes'),
+                          edge_val, no_sc, conviction, kf,
+                          kf * balance if balance else 0, decision, rationale))
+
+                scoring_conn.commit()
+            finally:
+                scoring_conn.close()
+
             if conviction < CONVICTION_MIN:
                 logger.info(f"[{condition_id}] Skipping — conviction {conviction:.3f} below {CONVICTION_MIN}")
-                continue
+
+            # ─── PHASE 4: Post maker limit orders on high-prob buckets ───
+            maker_conn = get_connection()
+            try:
+                for bucket in scored_buckets:
+                    if bucket['market_yes'] is None or bucket['model_prob'] < MAKER_MIN_PROB:
+                        continue
+
+                    fair_value = bucket['model_prob']
+                    mk_bid = fair_value - MAKER_SPREAD   # We BUY YES here
+                    mk_ask = fair_value + MAKER_SPREAD   # We SELL YES here
+
+                    bids, asks = book_manager.get_snapshot(bucket['token_id'])
+                    best_bid = bids[0][0] if bids else 0
+                    best_ask = asks[0][0] if asks else 1
+
+                    # Only post if we're improving the book (our bid >= their bid, or our ask <= their ask)
+                    if mk_bid >= best_bid:
+                        maker_conn.execute("""
+                            INSERT INTO maker_orders (timestamp, condition_id, bucket, side, price, size, fair_value, spread_offset, rationale)
+                            VALUES (?, ?, ?, 'BUY_YES', ?, ?, ?, ?, ?)
+                        """, (time.time(), condition_id, bucket['outcome_name'],
+                              mk_bid, MAKER_MAX_POSITION, fair_value, MAKER_SPREAD,
+                              f'Model={fair_value:.3f} bid@{mk_bid:.3f} vs market@{best_bid:.3f}'))
+
+                    if mk_ask <= best_ask:
+                        maker_conn.execute("""
+                            INSERT INTO maker_orders (timestamp, condition_id, bucket, side, price, size, fair_value, spread_offset, rationale)
+                            VALUES (?, ?, ?, 'SELL_YES', ?, ?, ?, ?, ?)
+                        """, (time.time(), condition_id, bucket['outcome_name'],
+                              mk_ask, MAKER_MAX_POSITION, fair_value, MAKER_SPREAD,
+                              f'Model={fair_value:.3f} ask@{mk_ask:.3f} vs market@{best_ask:.3f}'))
+
+                maker_conn.commit()
+            finally:
+                maker_conn.close()
 
             # Get single best NO candidate
             best = scored_buckets[0]

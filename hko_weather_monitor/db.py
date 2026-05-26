@@ -178,6 +178,39 @@ def init_db():
                 FOREIGN KEY(condition_id) REFERENCES markets(condition_id)
             );
 
+            -- Scoring log: every bucket scored gets logged with full rationale
+            CREATE TABLE IF NOT EXISTS scoring_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL,
+                condition_id TEXT,
+                bucket TEXT,
+                hko_forecast REAL,
+                model_prob REAL,
+                market_yes REAL,
+                edge REAL,
+                no_score REAL,
+                conviction REAL,
+                kelly_frac REAL,
+                position_size REAL,
+                decision TEXT,
+                rationale TEXT
+            );
+
+            -- Maker orders: two-sided limit orders posted by the engine
+            CREATE TABLE IF NOT EXISTS maker_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL,
+                condition_id TEXT,
+                bucket TEXT,
+                side TEXT,
+                price REAL,
+                size REAL,
+                fair_value REAL,
+                spread_offset REAL,
+                status TEXT DEFAULT 'OPEN',
+                rationale TEXT
+            );
+
             -- Accounts
             CREATE TABLE IF NOT EXISTS accounts (
                 account_id TEXT PRIMARY KEY,
