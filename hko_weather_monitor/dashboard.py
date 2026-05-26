@@ -1323,6 +1323,9 @@ HTML = """<!DOCTYPE html>
             }, 15000); // 15 seconds for near real-time
         }
         
+        // Initialize dashboard immediately on page load
+        refresh();
+        loadForecasts('HKO');
         startAutoRefresh();
     </script>
 </body>
@@ -1617,10 +1620,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 # 3. Multi-factor adjustments per date
                 factors_out = []
                 try:
-                    # Get active condition IDs
-                    conditions = conn.execute(
-                        "SELECT DISTINCT condition_id FROM market_outcomes"
-                    ).fetchall()
+                    # Get active condition IDs from currently live markets
+                    conditions = conn.execute("""
+                        SELECT DISTINCT mo.condition_id
+                        FROM market_outcomes mo
+                        JOIN markets m ON mo.condition_id = m.condition_id
+                        WHERE m.status = 'ACTIVE'
+                    """).fetchall()
                     for (cond,) in conditions:
                         import re as _re
                         m = _re.search(r'(\d{4}-\d{2}-\d{2})', cond)
@@ -1799,18 +1805,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 tracked_tokens = 0
                 tracked_dates = 0
 
-            # Scoring log (latest per bucket) — independent connection (conn was closed earlier)
+            # Scoring log (latest per bucket) — optimized window function
             scoring_out = []
             try:
                 scoring_conn = sqlite3.connect(DB_PATH)
                 for row in scoring_conn.execute("""
+                    WITH ranked AS (
+                        SELECT *, ROW_NUMBER() OVER (
+                            PARTITION BY condition_id, bucket
+                            ORDER BY timestamp DESC
+                        ) as rn
+                        FROM scoring_log
+                    )
                     SELECT timestamp, condition_id, bucket, hko_forecast,
                            model_prob, market_yes, edge, no_score, conviction,
                            kelly_frac, position_size, decision, rationale
-                    FROM scoring_log
-                    WHERE timestamp = (SELECT MAX(timestamp) FROM scoring_log sl2
-                                       WHERE sl2.condition_id = scoring_log.condition_id
-                                         AND sl2.bucket = scoring_log.bucket)
+                    FROM ranked
+                    WHERE rn = 1
                     ORDER BY condition_id, bucket
                 """).fetchall():
                     scoring_out.append({
@@ -1825,17 +1836,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 import traceback
                 traceback.print_exc()
 
-            # Maker orders (latest per bucket) — independent connection (conn was closed earlier)
+            # Maker orders (latest per bucket) — optimized window function
             maker_out = []
             try:
                 maker_conn = sqlite3.connect(DB_PATH)
                 for row in maker_conn.execute("""
+                    WITH ranked AS (
+                        SELECT *, ROW_NUMBER() OVER (
+                            PARTITION BY condition_id, bucket
+                            ORDER BY timestamp DESC
+                        ) as rn
+                        FROM maker_orders
+                    )
                     SELECT timestamp, condition_id, bucket, side, price, size,
                            fair_value, spread_offset, rationale, status
-                    FROM maker_orders
-                    WHERE timestamp = (SELECT MAX(timestamp) FROM maker_orders mo2
-                                       WHERE mo2.condition_id = maker_orders.condition_id
-                                         AND mo2.bucket = maker_orders.bucket)
+                    FROM ranked
+                    WHERE rn = 1
                     ORDER BY condition_id, bucket, side
                 """).fetchall():
                     maker_out.append({
