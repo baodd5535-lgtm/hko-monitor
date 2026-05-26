@@ -1630,7 +1630,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
                         # UV adjustment
                         import hko_weather_monitor.uv_fetcher as _uv
-                        uv_peak = _uv.get_peak_uv_index(date_hko, cloud_cover_pct)
+                        uv_peak = _uv.get_peak_uv_index(date_hko, cloud_cov)
                         uv_adj = _uv.get_uv_forecast_adjustment(uv_peak)
                         # None safety: ensure all adjustments are numeric before math
                         uv_adj = uv_adj if uv_adj is not None else 0.0
@@ -1664,8 +1664,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             'adjusted_temp': adjusted_temp,
                             'details': f'Cloud:{cloud_cov:.0f}% Wind:{dominant_dir} {wind_speed_avg:.1f}m/s RH:{humidity_avg:.0f}% Rain:{daily["chance_of_rain"] or 0}% UV:{uv_peak} ({uv_level})',
                         })
-                except Exception:
-                    pass
+                except Exception as _e:
+                    import logging as _log
+                    _log.getLogger('dashboard').error(f'factors loop error for {cond}: {_e}', exc_info=True)
 
                 conn.commit()
 
