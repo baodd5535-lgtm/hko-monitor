@@ -270,6 +270,11 @@ def init_db():
             );
         """)
         conn.execute("INSERT OR IGNORE INTO accounts (account_id, cash_balance) VALUES ('paper_user', 10000.0)")
+
+        # Engine status keys
+        for key in ('last_hko_sync', 'last_heartbeat', 'last_rescore', 'risk_halt', 'last_drawdown_check'):
+            conn.execute("INSERT OR IGNORE INTO engine_status (key, value) VALUES (?, '0')", (key,))
+
         conn.commit()
         conn.close()
 

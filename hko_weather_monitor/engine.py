@@ -529,7 +529,7 @@ class WeatherTradingEngine:
             await self._check_risk_management()
 
     async def _check_risk_management(self):
-        """Check portfolio risk: unrealized losses, total exposure."""
+        """Check portfolio risk: unrealized losses, total exposure, drawdown circuit breaker."""
         conn = get_connection()
         try:
             balance = conn.execute(
@@ -551,6 +551,27 @@ class WeatherTradingEngine:
                     f"[RISK] {num_positions} positions, "
                     f"avg exposure: {avg_exposure:.1f}% of balance"
                 )
+
+            # Drawdown circuit breaker: 24h rolling window
+            peak_balance = conn.execute("""
+                SELECT MAX(cash_balance) FROM paper_fills
+                WHERE timestamp > strftime('%s', 'now', '-24 hours')
+            """).fetchone()[0]
+            if peak_balance and peak_balance > 0:
+                drawdown_pct = (peak_balance - balance) / peak_balance
+                risk_halt = conn.execute(
+                    "SELECT value FROM engine_status WHERE key='risk_halt'"
+                ).fetchone()
+                risk_halt = float(risk_halt[0]) if risk_halt else 0
+                if drawdown_pct > 0.05 and risk_halt == 0:
+                    conn.execute("UPDATE engine_status SET value=1 WHERE key='risk_halt'")
+                    conn.commit()
+                    log_trigger('risk_halt', f'Drawdown {drawdown_pct:.1%} > 5% — circuit breaker triggered for 12h')
+                    logger.warning(f"[RISK HALT] Drawdown {drawdown_pct:.1%} exceeded 5% threshold — halting trades")
+                elif risk_halt == 1 and drawdown_pct <= 0.02:
+                    conn.execute("UPDATE engine_status SET value=0 WHERE key='risk_halt'")
+                    conn.commit()
+                    logger.info("[RISK HALT CLEARED] Drawdown recovered below 2%")
         except Exception as e:
             logger.debug(f"Risk check failed: {e}")
         finally:
@@ -588,6 +609,19 @@ class WeatherTradingEngine:
             CONVICTION_MIN,
             MAX_PORTFOLIO_EXPOSURE_PCT,
         )
+        from hko_weather_monitor.scoring_core import get_orderbook_snapshot
+
+        # Risk halt check — abort if circuit breaker is tripped
+        conn_halt = get_connection()
+        try:
+            risk_halt = conn_halt.execute(
+                "SELECT value FROM engine_status WHERE key='risk_halt'"
+            ).fetchone()
+            if risk_halt and float(risk_halt[0]) > 0:
+                logger.warning("[RISK HALT ACTIVE] Skipping scoring — drawdown circuit breaker engaged")
+                return
+        finally:
+            conn_halt.close()
 
         if not self.book_manager:
             logger.warning("No orderbook connection — skipping scoring")
@@ -672,28 +706,18 @@ class WeatherTradingEngine:
                     )
                     all_probs.append(model_prob)
 
-                    bids, asks = self.book_manager.get_snapshot(token_id)
+                    bids, asks = get_orderbook_snapshot(token_id, self.book_manager)
                     if not bids or not asks:
-                        # Fallback: query orderbook_state DB for latest prices
-                        fb = conn_fb.execute("""
-                            SELECT best_bid, best_ask
-                            FROM orderbook_state
-                            WHERE token_id = ? AND best_bid IS NOT NULL
-                            ORDER BY id DESC LIMIT 1
-                        """, (token_id,)).fetchone()
-                        if fb and fb[1]:
-                            bids, asks = [((fb[0], 100),)], [((fb[1], 100),)]
-                        else:
-                            all_market_prices.append(0.0)
-                            scored_buckets.append({
-                                'token_id': token_id,
-                                'outcome_name': outcome_name,
-                                'model_prob': model_prob,
-                                'market_yes': None,
-                                'no_score': 0,
-                                'momentum': 0,
-                            })
-                            continue
+                        all_market_prices.append(0.0)
+                        scored_buckets.append({
+                            'token_id': token_id,
+                            'outcome_name': outcome_name,
+                            'model_prob': model_prob,
+                            'market_yes': None,
+                            'no_score': 0,
+                            'momentum': 0,
+                        })
+                        continue
 
                     best_bid = bids[0][0]
                     best_ask = asks[0][0]
@@ -743,65 +767,59 @@ class WeatherTradingEngine:
                 # Conviction check on blended distribution
                 conviction = calculate_conviction(blended_probs) if blended_probs else 0.0
 
-                # ─── Log ALL scoring decisions + maker orders ───
-                bal = 0
+                # Get existing positions & balance early (needed for scoring log)
+                conn_init = get_connection()
+                try:
+                    existing = conn_init.execute(
+                        "SELECT COUNT(*) FROM paper_positions WHERE condition_id = ? AND side = 'NO' AND status = 'OPEN'",
+                        (condition_id,)).fetchone()[0]
+                    bal = conn_init.execute("SELECT cash_balance FROM accounts WHERE account_id='paper_user'").fetchone()[0]
+                finally:
+                    conn_init.close()
+
+                # ─── Log ALL scoring decisions + maker orders (uses scoring_core) ───
+                from hko_weather_monitor.scoring_core import (
+                    log_scoring_decision, log_maker_order, determine_decision,
+                    should_post_maker_order, get_orderbook_snapshot,
+                )
+                from hko_weather_monitor.pipeline import MAKER_SPREAD, MAKER_MAX_POSITION, MAKER_MIN_PROB
+
                 conn_s = get_connection()
                 try:
-                    bal = conn_s.execute("SELECT cash_balance FROM accounts WHERE account_id='paper_user'").fetchone()[0]
-
                     for bkt in scored_buckets:
                         edge_val = (bkt.get('market_yes', 0) or 0) - bkt['model_prob']
                         no_sc = bkt.get('no_score', 0)
                         kf = max(0, 0.25 * edge_val / (1.0 - (bkt.get('market_yes', 0) or 0))) if edge_val > 0 else 0
+                        decision, rationale = determine_decision(
+                            bkt.get('market_yes'), conviction, existing, no_sc,
+                            edge_val, threshold, kf, bal, CONVICTION_MIN,
+                        )
+                        log_scoring_decision(conn_s, condition_id, bkt['outcome_name'],
+                                             adjusted_temp, bkt['model_prob'],
+                                             bkt.get('market_yes'), edge_val, no_sc,
+                                             conviction, kf, kf * bal, decision, rationale)
 
-                        if bkt['market_yes'] is None:
-                            decision, rationale = 'SKIP', 'No orderbook data'
-                        elif conviction < CONVICTION_MIN:
-                            decision, rationale = 'SKIP', f'Conviction {conviction:.3f} < {CONVICTION_MIN}'
-                        elif existing > 0:
-                            decision, rationale = 'SKIP', f'Already have {existing} NO position(s)'
-                        elif no_sc > 0 and edge_val >= threshold and kf * bal > 10:
-                            decision, rationale = 'TRADE_CANDIDATE', f'Edge={edge_val:.4f} NO={no_sc:.4f} Kelly={kf:.4f}'
-                        elif no_sc <= 0:
-                            decision, rationale = 'SKIP', 'Market overpriced YES — no edge'
-                        elif edge_val < threshold:
-                            decision, rationale = 'SKIP', f'Edge {edge_val:.4f} < threshold {threshold:.4f}'
-                        else:
-                            decision, rationale = 'SKIP', 'Position too small'
-
-                        conn_s.execute("""
-                            INSERT INTO scoring_log (timestamp, condition_id, bucket, hko_forecast,
-                                model_prob, market_yes, edge, no_score, conviction, kelly_frac,
-                                position_size, decision, rationale)
-                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-                        """, (time.time(), condition_id, bkt['outcome_name'], adjusted_temp,
-                              bkt['model_prob'], bkt.get('market_yes'), edge_val, no_sc,
-                              conviction, kf, kf*bal, decision, rationale))
-
-                    # Maker orders: post improving-limit orders on high-prob buckets
-                    from hko_weather_monitor.pipeline import MAKER_SPREAD, MAKER_MAX_POSITION, MAKER_MIN_PROB
+                    # Maker orders: horizon-scaled spread, two-sided
                     for bkt in scored_buckets:
-                        if bkt['market_yes'] is None or bkt['model_prob'] < MAKER_MIN_PROB:
+                        mk_bid, mk_ask = should_post_maker_order(
+                            bkt.get('market_yes'), bkt['model_prob'],
+                            MAKER_MIN_PROB, MAKER_SPREAD, horizon,
+                        )
+                        if mk_bid is None:
                             continue
-                        fv = bkt['model_prob']
-                        mk_bid, mk_ask = fv - MAKER_SPREAD, fv + MAKER_SPREAD
-                        bids, asks = self.book_manager.get_snapshot(bkt['token_id'])
-                        bb = bids[0][0] if bids else 0
-                        ba = asks[0][0] if asks else 1
+                        ob, oa = get_orderbook_snapshot(bkt['token_id'], self.book_manager)
+                        bb = ob[0][0] if ob else 0
+                        ba = oa[0][0] if oa else 1
                         if mk_bid >= bb:
-                            conn_s.execute("""
-                                INSERT INTO maker_orders (timestamp,condition_id,bucket,side,price,size,fair_value,spread_offset,rationale)
-                                VALUES (?,?,?,?,?,?,?,?,?)
-                            """, (time.time(), condition_id, bkt['outcome_name'], 'BUY_YES',
-                                  mk_bid, MAKER_MAX_POSITION, fv, MAKER_SPREAD,
-                                  f'Model={fv:.3f} bid@{mk_bid:.3f} vs mkt@{bb:.3f}'))
+                            log_maker_order(conn_s, condition_id, bkt['outcome_name'],
+                                            'BUY_YES', mk_bid, MAKER_MAX_POSITION,
+                                            bkt['model_prob'], MAKER_SPREAD,
+                                            f'Model={bkt["model_prob"]:.3f} bid@{mk_bid:.3f} vs mkt@{bb:.3f}')
                         if mk_ask <= ba:
-                            conn_s.execute("""
-                                INSERT INTO maker_orders (timestamp,condition_id,bucket,side,price,size,fair_value,spread_offset,rationale)
-                                VALUES (?,?,?,?,?,?,?,?,?)
-                            """, (time.time(), condition_id, bkt['outcome_name'], 'SELL_YES',
-                                  mk_ask, MAKER_MAX_POSITION, fv, MAKER_SPREAD,
-                                  f'Model={fv:.3f} ask@{mk_ask:.3f} vs mkt@{ba:.3f}'))
+                            log_maker_order(conn_s, condition_id, bkt['outcome_name'],
+                                            'SELL_YES', mk_ask, MAKER_MAX_POSITION,
+                                            bkt['model_prob'], MAKER_SPREAD,
+                                            f'Model={bkt["model_prob"]:.3f} ask@{mk_ask:.3f} vs mkt@{ba:.3f}')
 
                     conn_s.commit()
                 finally:

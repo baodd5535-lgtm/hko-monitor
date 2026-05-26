@@ -409,7 +409,45 @@ HTML = """<!DOCTYPE html>
                     <tbody id="no-factor-body"></tbody>
                 </table>
             </div>
-            
+
+            <!-- Live Scoring Decisions -->
+            <div style="margin-bottom:20px">
+                <h4 style="color:#ccc;margin-bottom:12px">🎯 Live Scoring Decisions Log</h4>
+                <table style="width:100%;border-collapse:collapse" id="scoring-log-table">
+                    <thead>
+                        <tr style="border-bottom:1px solid #333">
+                            <th style="text-align:left;padding:8px;color:#888">Market ID</th>
+                            <th style="text-align:left;padding:8px;color:#888">Bucket</th>
+                            <th style="text-align:right;padding:8px;color:#888">Model Prob</th>
+                            <th style="text-align:right;padding:8px;color:#888">Market Price</th>
+                            <th style="text-align:right;padding:8px;color:#888">Edge</th>
+                            <th style="text-align:left;padding:8px;color:#888">Decision</th>
+                            <th style="text-align:left;padding:8px;color:#888">Rationale</th>
+                        </tr>
+                    </thead>
+                    <tbody id="scoring-log-body"></tbody>
+                </table>
+            </div>
+
+            <!-- Active Market Maker Orders -->
+            <div style="margin-bottom:20px">
+                <h4 style="color:#ccc;margin-bottom:12px">🤖 Active Market Maker Limit Orders</h4>
+                <table style="width:100%;border-collapse:collapse" id="maker-orders-table">
+                    <thead>
+                        <tr style="border-bottom:1px solid #333">
+                            <th style="text-align:left;padding:8px;color:#888">Market ID</th>
+                            <th style="text-align:left;padding:8px;color:#888">Bucket</th>
+                            <th style="text-align:left;padding:8px;color:#888">Side</th>
+                            <th style="text-align:right;padding:8px;color:#888">Quote Price</th>
+                            <th style="text-align:right;padding:8px;color:#888">Size</th>
+                            <th style="text-align:right;padding:8px;color:#888">Fair Value</th>
+                            <th style="text-align:left;padding:8px;color:#888">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="maker-orders-body"></tbody>
+                </table>
+            </div>
+
             <!-- NO Positions -->
             <div style="margin-bottom:20px">
                 <h4 style="color:#ccc;margin-bottom:12px">📉 NO Positions (Short YES) — All</h4>
@@ -1176,8 +1214,48 @@ HTML = """<!DOCTYPE html>
                         <td style="padding:8px;color:#666;font-size:11px">${p.trigger || 'N/A'}</td>
                     </tr>`;
                 }).join('');
-            } else if (posBody) {
+                    } else if (posBody) {
                 posBody.innerHTML = '<tr><td colspan="8" style="padding:20px;text-align:center;color:#666">No NO positions yet</td></tr>';
+            }
+
+            // Scoring decisions log
+            const scoringBody = document.getElementById('scoring-log-body');
+            if (scoringBody && data.scoring && data.scoring.length > 0) {
+                scoringBody.innerHTML = data.scoring.map(s => {
+                    const decColor = s.decision === 'TRADE_CANDIDATE' ? '#4caf50' :
+                                     s.decision === 'SKIP' ? '#888' : '#ff9800';
+                    return `<tr style="border-bottom:1px solid #1a1a2e">
+                        <td style="padding:8px;color:#888;font-size:11px">${s.condition_id || ''}</td>
+                        <td style="padding:8px;color:#ccc">${s.bucket || ''}</td>
+                        <td style="padding:8px;text-align:right;color:#00d4ff">${s.model_prob != null ? s.model_prob.toFixed(3) : '-'}</td>
+                        <td style="padding:8px;text-align:right;color:#ccc">${s.market_yes != null ? s.market_yes.toFixed(3) : '-'}</td>
+                        <td style="padding:8px;text-align:right;color:${(s.edge||0) > 0 ? '#4caf50' : '#f44336'}">${s.edge != null ? s.edge.toFixed(3) : '-'}</td>
+                        <td style="padding:8px;text-align:left;color:${decColor};font-weight:bold;font-size:11px">${s.decision || '-'}</td>
+                        <td style="padding:8px;color:#888;font-size:11px">${s.rationale || ''}</td>
+                    </tr>`;
+                }).join('');
+            } else if (scoringBody) {
+                scoringBody.innerHTML = '<tr><td colspan="7" style="padding:20px;text-align:center;color:#666">No scoring decisions yet</td></tr>';
+            }
+
+            // Maker orders
+            const makerBody = document.getElementById('maker-orders-body');
+            if (makerBody && data.maker_orders && data.maker_orders.length > 0) {
+                makerBody.innerHTML = data.maker_orders.map(m => {
+                    const sideColor = m.side === 'BUY_YES' ? '#4caf50' : '#f44336';
+                    const statusColor = m.status === 'OPEN' ? '#4caf50' : '#888';
+                    return `<tr style="border-bottom:1px solid #1a1a2e">
+                        <td style="padding:8px;color:#888;font-size:11px">${m.condition_id || ''}</td>
+                        <td style="padding:8px;color:#ccc">${m.bucket || ''}</td>
+                        <td style="padding:8px;text-align:left;color:${sideColor};font-weight:bold;font-size:11px">${m.side || '-'}</td>
+                        <td style="padding:8px;text-align:right;color:#fff">${m.price != null ? m.price.toFixed(3) : '-'}</td>
+                        <td style="padding:8px;text-align:right;color:#ccc">${m.size != null ? m.size.toFixed(0) : '-'}</td>
+                        <td style="padding:8px;text-align:right;color:#00d4ff">${m.fair_value != null ? m.fair_value.toFixed(3) : '-'}</td>
+                        <td style="padding:8px;text-align:left;color:${statusColor};font-size:11px">${m.status || '-'}</td>
+                    </tr>`;
+                }).join('');
+            } else if (makerBody) {
+                makerBody.innerHTML = '<tr><td colspan="7" style="padding:20px;text-align:center;color:#666">No maker orders yet</td></tr>';
             }
         }
 
