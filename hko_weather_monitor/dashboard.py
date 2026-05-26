@@ -1630,7 +1630,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
                         # UV adjustment
                         import hko_weather_monitor.uv_fetcher as _uv
-                        uv_peak = _uv.get_peak_uv_index(date_hko)
+                        uv_peak = _uv.get_peak_uv_index(date_hko, cloud_cover_pct)
                         uv_adj = _uv.get_uv_forecast_adjustment(uv_peak)
                         # None safety: ensure all adjustments are numeric before math
                         uv_adj = uv_adj if uv_adj is not None else 0.0

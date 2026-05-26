@@ -70,24 +70,65 @@ def parse_uv_data(text: str) -> Optional[Dict]:
     }
 
 
-def get_peak_uv_index(date_str: Optional[str] = None) -> Optional[float]:
-    """Get peak UV index for today or specified date.
-    
-    Returns peak UV index value for the day.
+def _estimate_uv_from_cloud_and_season(date_str: str, cloud_cover_pct: float) -> float:
+    """Estimate peak UV index for a future date based on cloud cover and season.
+
+    HKO doesn't publish UV forecasts — only same-day observations.
+    Use a physics-based estimate: latitude 22.3°N, seasonal solar zenith,
+    attenuated by cloud cover (approximate).
     """
+    from datetime import datetime
+    try:
+        dt = datetime.strptime(date_str, '%Y%m%d')
+    except ValueError:
+        return 5.0  # default moderate
+
+    # Day of year (1=Jan 1, 365=Dec 31)
+    doy = dt.timetuple().tm_yday
+
+    # Approximate peak UV index for HK (22.3°N) by day of year
+    # Max ~12-13 in mid-August, min ~4-5 in January
+    # Formula: UV_peak_clear = 8.5 + 4.5 * sin(2π * (doy - 105) / 365)
+    import math
+    base_uv = 8.5 + 4.5 * math.sin(2 * math.pi * (doy - 105) / 365.0)
+
+    # Cloud attenuation (approximate)
+    # 0% cloud → 100% UV, 100% cloud → ~20% UV
+    cloud_factor = 1.0 - 0.8 * (cloud_cover_pct / 100.0)
+    estimated_uv = base_uv * cloud_factor
+
+    return max(0.5, round(estimated_uv, 1))
+
+
+def get_peak_uv_index(
+    date_str: Optional[str] = None,
+    cloud_cover_pct: Optional[float] = None,
+) -> Optional[float]:
+    """Get peak UV index for today or specified date.
+
+    For today: fetches real observation from HKO uv15min_daws.txt.
+    For future dates: estimates based on cloud cover and season (HKO has no UV forecast).
+
+    Args:
+        date_str: YYYYMMDD string. None = today.
+        cloud_cover_pct: Cloud cover percentage (0-100) for estimation.
+                         Only used when date is not today.
+    """
+    # Try real HKO data first (same-day only)
     uv_data = fetch_uv_data('uv15min_daws')
-    if not uv_data:
-        return None
-    
-    if date_str and uv_data['date'] != date_str:
-        return None
-    
-    peak = 0.0
-    for entry in uv_data['data']:
-        if entry['uv_index'] is not None:
-            peak = max(peak, entry['uv_index'])
-    
-    return peak if peak > 0 else None
+    if uv_data and (not date_str or uv_data['date'] == date_str):
+        peak = 0.0
+        for entry in uv_data['data']:
+            if entry['uv_index'] is not None:
+                peak = max(peak, entry['uv_index'])
+        return peak if peak > 0 else None
+
+    # Future date: estimate from cloud cover + season
+    if date_str and cloud_cover_pct is not None:
+        return _estimate_uv_from_cloud_and_season(date_str, cloud_cover_pct)
+
+    # Fallback: default moderate UV for HK in May
+    return None
 
 
 def get_uv_index_at_time(time_val: float) -> Optional[float]:
